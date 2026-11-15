@@ -36,10 +36,10 @@ struct ContentView: View {
                     viewfinder
 
                     Text(cam.hint)
-                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                        .font(.system(size: 18, weight: .semibold, design: .rounded))
                         .foregroundColor(hintColor)
                         .multilineTextAlignment(.center)
-                        .frame(minHeight: 40)
+                        .frame(minHeight: 46)
                         .padding(.horizontal, 16)
 
                     zoomRow
@@ -87,10 +87,10 @@ struct ContentView: View {
 
             Spacer()
 
+            toggleButton(on: cam.autoShot, symbolOn: "a.circle.fill", symbolOff: "a.circle", label: "Automatico") {
+                cam.setAutoShot(!cam.autoShot)
+            }
             if cam.mode == .outfit {
-                toggleButton(on: cam.autoShot, symbolOn: "timer", symbolOff: "timer", label: "Autoscatto") {
-                    cam.setAutoShot(!cam.autoShot)
-                }
                 toggleButton(on: cam.voiceOn, symbolOn: "speaker.wave.2.fill", symbolOff: "speaker.slash.fill", label: "Voce") {
                     cam.setVoice(!cam.voiceOn)
                 }

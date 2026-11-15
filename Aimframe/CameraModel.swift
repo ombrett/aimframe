@@ -52,7 +52,9 @@ final class CameraModel: NSObject, ObservableObject {
     // MARK: Shown by the UI (coordinates are 0...1 with the origin at the top left)
 
     @Published var authorized = true
-    @Published var phase: GuidePhase = .free
+    @Published var phase: GuidePhase = .free {
+        didSet { if oldValue != phase { phaseSince = CACurrentMediaTime() } }
+    }
     @Published var subjectBox: CGRect?
     @Published var target = CGPoint(x: 0.5, y: 0.5)
     @Published var label = ""
@@ -99,6 +101,13 @@ final class CameraModel: NSObject, ObservableObject {
     private var device: AVCaptureDevice?
     private var wideFactor: CGFloat = 1          // zoom factor at which the main (1x) lens is used
     private let motion = CMMotionManager()
+
+    // Auto mode (main thread): the app scans and shoots by itself, the user only points the phone.
+    private var phaseSince: CFTimeInterval = 0
+    private var steadySince: CFTimeInterval = 0
+    private var nextAutoScan: CFTimeInterval = 0
+    private var needsMove = false                 // after a shot, wait for the phone to move to a new scene
+    private var overlayOpen = false
 
     // MARK: Guide state (videoQueue only; Vision coordinates, origin at the bottom left)
 
@@ -234,6 +243,39 @@ final class CameraModel: NSObject, ObservableObject {
             // Roll is only meaningful while the phone is not pointing steeply up or down.
             let across = (g.x * g.x + g.y * g.y).squareRoot()
             self.roll = across > 0.35 ? atan2(g.x, -g.y) : nil
+            if let r = data?.rotationRate {
+                self.autoPilot(turning: (r.x * r.x + r.y * r.y + r.z * r.z).squareRoot())
+            }
+        }
+    }
+
+    /// Runs about 30 times a second. In auto mode it starts the scan when the phone is held still,
+    /// takes the photo once the framing has stayed right for a moment, and starts over on a new scene.
+    private func autoPilot(turning: Double) {
+        let now = CACurrentMediaTime()
+        if turning > 0.12 { steadySince = now }
+        if turning > 0.6 { needsMove = false }
+        guard mode == .landscape, autoShot, reviewImage == nil, !overlayOpen else { return }
+        switch phase {
+        case .free:
+            if needsMove {
+                hint = "Fatto. Punta il telefono su un'altra scena"
+            } else if now - steadySince > 0.9 && now > nextAutoScan {
+                nextAutoScan = now + 3
+                scanOrClear()
+            } else if hint != "Analizzo la scena…" {
+                hint = "Punta il telefono sulla scena e tienilo fermo"
+            }
+        case .locked:
+            if now - phaseSince > 0.9 {
+                needsMove = true
+                capture()
+                scanOrClear()
+            }
+        case .lost:
+            if now - phaseSince > 1.5 { scanOrClear() }
+        case .guiding:
+            break
         }
     }
 
@@ -647,6 +689,7 @@ final class CameraModel: NSObject, ObservableObject {
 
     /// Stops the live analysis and the voice while another screen is on top of the camera.
     func setPaused(_ on: Bool) {
+        overlayOpen = on
         if on { speaker.stop() }
         videoQueue.async {
             self.paused = on
