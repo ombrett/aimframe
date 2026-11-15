@@ -84,6 +84,8 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var recommendReason = ""
     @Published var intensity: Double = 1
     @Published var savingReview = false
+    @Published var frameStyle = 0                 // 0 none, 1 white card, 2 black card
+    @Published var exposureText = ""
 
     let session = AVCaptureSession()
     private let speaker = Speaker()
@@ -110,6 +112,8 @@ final class CameraModel: NSObject, ObservableObject {
     private var lockRun = 0
     private var lostRun = 0
     private var locked = false
+    private var advice = "Inquadratura giusta. Resta fermo e scatta."
+    private var exposureTick = 0
 
     // MARK: Outfit state (videoQueue only)
 
@@ -316,6 +320,7 @@ final class CameraModel: NSObject, ObservableObject {
             .prefix(2)
             .map { $0.identifier.replacingOccurrences(of: "_", with: " ") }
         let text = names.isEmpty ? "soggetto" : names.joined(separator: ", ")
+        advice = Self.advice(for: pixelBuffer, subject: box)
 
         // Composition: the thirds point nearest the subject keeps the rest of the scene in the frame.
         anchor = CGPoint(x: box.midX < 0.4 ? 1.0 / 3.0 : (box.midX > 0.6 ? 2.0 / 3.0 : 0.5),
@@ -396,7 +401,7 @@ final class CameraModel: NSObject, ObservableObject {
 
         let message: String
         if locked {
-            message = "Inquadratura giusta. Resta fermo e scatta."
+            message = advice
         } else {
             var parts: [String] = []
             if abs(dx) > 0.04 { parts.append(dx > 0 ? "a destra" : "a sinistra") }
@@ -429,6 +434,38 @@ final class CameraModel: NSObject, ObservableObject {
             self.subjectBox = nil
             self.hint = "Ho perso il soggetto. Tocca ✕ e analizza di nuovo."
         }
+    }
+
+    /// One line on what makes this shot work, from the light on the subject compared with the rest of the scene.
+    private static func advice(for pixelBuffer: CVPixelBuffer, subject box: CGRect) -> String {
+        let image = CIImage(cvPixelBuffer: pixelBuffer)
+        let e = image.extent
+        let whole = Grade.average(image, rect: e)
+        let sub = Grade.average(image, rect: CGRect(x: e.minX + box.minX * e.width, y: e.minY + box.minY * e.height,
+                                                    width: box.width * e.width, height: box.height * e.height))
+        let sky = Grade.average(image, rect: CGRect(x: e.minX, y: e.minY + e.height * 0.66, width: e.width, height: e.height * 0.34))
+        let lightAll = (whole.r + whole.g + whole.b) / 3
+        let lightSub = (sub.r + sub.g + sub.b) / 3
+        let warm = sub.r > sub.b * 1.2
+        let mx = max(whole.r, whole.g, whole.b), mn = min(whole.r, whole.g, whole.b)
+        let colour = mx > 0 ? (mx - mn) / mx : 0
+
+        if lightSub > lightAll * 1.15 && warm { return "Bella luce calda sul soggetto: resta lì e scatta" }
+        if lightSub > lightAll * 1.15 { return "Il soggetto è in piena luce: resta lì e scatta" }
+        if lightSub < lightAll * 0.7 { return "Soggetto in controluce: lascialo in silhouette e scatta" }
+        if sky.b > sky.r * 1.15 { return "Soggetto isolato, cielo pulito sopra: scatta" }
+        if colour < 0.12 { return "Pochi colori: contano forme e contrasto. Scatta" }
+        return "Soggetto isolato dallo sfondo: resta fermo e scatta"
+    }
+
+    /// Shutter speed and ISO the camera is using right now.
+    private func publishExposure() {
+        guard let device = device else { return }
+        let seconds = CMTimeGetSeconds(device.exposureDuration)
+        guard seconds > 0, seconds.isFinite else { return }
+        let shutter = seconds >= 1 ? String(format: "%.1fs", seconds) : "1/\(Int((1 / seconds).rounded()))"
+        let text = "\(shutter)   ISO \(Int(device.iso.rounded()))"
+        DispatchQueue.main.async { if self.exposureText != text { self.exposureText = text } }
     }
 
     /// Vision rectangles start at the bottom left, the screen starts at the top left.
@@ -684,12 +721,15 @@ final class CameraModel: NSObject, ObservableObject {
         for look in Grade.looks {
             if let t = Grade.uiImage(Grade.render(small, look: look, intensity: 1)) { thumbs[look.id] = t }
         }
-        guard let preview = Grade.uiImage(Grade.render(base, look: Grade.look(pick.id), intensity: 1)) else {
+        reviewData = data
+        reviewBase = base
+        let style = DispatchQueue.main.sync { self.frameStyle }
+        guard let preview = Grade.uiImage(Grade.framed(Grade.render(base, look: Grade.look(pick.id), intensity: 1), style: style)) else {
+            reviewData = nil
+            reviewBase = nil
             saveToPhotos(data)
             return
         }
-        reviewData = data
-        reviewBase = base
         videoQueue.async { self.paused = true }
         DispatchQueue.main.async {
             self.speaker.stop()
@@ -714,14 +754,20 @@ final class CameraModel: NSObject, ObservableObject {
         rerender()
     }
 
+    func setFrameStyle(_ style: Int) {
+        frameStyle = style
+        rerender()
+    }
+
     private func rerender() {
         renderToken += 1
         let token = renderToken
         let id = selectedLook
         let amount = CGFloat(intensity)
+        let style = frameStyle
         gradeQueue.async {
             guard token == self.renderToken, let base = self.reviewBase,
-                  let image = Grade.uiImage(Grade.render(base, look: Grade.look(id), intensity: amount)) else { return }
+                  let image = Grade.uiImage(Grade.framed(Grade.render(base, look: Grade.look(id), intensity: amount), style: style)) else { return }
             DispatchQueue.main.async {
                 if token == self.renderToken && self.reviewImage != nil { self.reviewImage = image }
             }
@@ -734,14 +780,15 @@ final class CameraModel: NSObject, ObservableObject {
         savingReview = true
         let id = selectedLook
         let amount = CGFloat(intensity)
+        let style = frameStyle
         gradeQueue.async {
             guard let data = self.reviewData else {
                 self.closeReview()
                 return
             }
             var output = data                       // at 0% the original file is kept untouched
-            if amount >= 0.01, let full = CIImage(data: data, options: [.applyOrientationProperty: true]) {
-                let graded = Grade.render(full, look: Grade.look(id), intensity: amount)
+            if amount >= 0.01 || style != 0, let full = CIImage(data: data, options: [.applyOrientationProperty: true]) {
+                let graded = Grade.framed(Grade.render(full, look: Grade.look(id), intensity: amount), style: style)
                 let space = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
                 if let heif = Grade.context.heifRepresentation(of: graded, format: .RGBA8, colorSpace: space, options: [:]) {
                     output = heif
@@ -827,6 +874,8 @@ final class CameraModel: NSObject, ObservableObject {
 extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard !paused, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        exposureTick += 1
+        if exposureTick % 10 == 0 { publishExposure() }
         if vMode == .outfit {
             frameCount += 1
             if frameCount % 2 == 0 { runPose(pixelBuffer) }

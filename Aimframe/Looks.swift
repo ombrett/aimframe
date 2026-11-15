@@ -147,7 +147,7 @@ enum Grade {
     // MARK: Choosing a look
 
     /// Average colour of part of the picture, 0...1 per channel.
-    private static func average(_ image: CIImage, rect: CGRect) -> (r: CGFloat, g: CGFloat, b: CGFloat) {
+    static func average(_ image: CIImage, rect: CGRect) -> (r: CGFloat, g: CGFloat, b: CGFloat) {
         let f = CIFilter.areaAverage()
         f.inputImage = image
         f.extent = rect
@@ -172,6 +172,46 @@ enum Grade {
         if top.b > top.r * 1.15 { return ("teal", "Cielo in alto: azzurri profondi e toni caldi sul soggetto") }
         if colour < 0.12 { return ("film", "Colori tenui: resa morbida da pellicola") }
         return ("teal", "Luce neutra: il classico look da cinema")
+    }
+
+    // MARK: Photo frame
+
+    /// Puts the photo on a white (1) or black (2) card with a caption underneath. 0 leaves it as it is.
+    static func framed(_ image: CIImage, style: Int) -> CIImage {
+        guard style == 1 || style == 2 else { return image }
+        let e = image.extent
+        let side = max(e.width, e.height)
+        let margin = (side * 0.04).rounded(), bottom = (side * 0.11).rounded()
+        let canvas = CGRect(x: 0, y: 0, width: e.width + 2 * margin, height: e.height + margin + bottom)
+        let white = style == 1
+        let paper = white ? CIColor(red: 0.97, green: 0.965, blue: 0.95) : CIColor(red: 0.04, green: 0.04, blue: 0.045)
+        let card = CIImage(color: paper).cropped(to: canvas)
+        let placed = image.transformed(by: CGAffineTransform(translationX: margin - e.minX, y: bottom - e.minY))
+        var out = placed.composited(over: card)
+
+        let text = CIFilter.textImageGenerator()
+        text.text = "Shot on iPhone  ·  Aimframe"
+        text.fontName = "HelveticaNeue-Medium"
+        text.fontSize = Float(side * 0.017)
+        text.scaleFactor = 1
+        if let glyphs = text.outputImage {
+            let ink: CGFloat = white ? 0.25 : 0.8
+            let tint = CIFilter.colorMatrix()
+            tint.inputImage = glyphs
+            tint.rVector = CIVector(x: 0, y: 0, z: 0, w: 0)
+            tint.gVector = CIVector(x: 0, y: 0, z: 0, w: 0)
+            tint.bVector = CIVector(x: 0, y: 0, z: 0, w: 0)
+            tint.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
+            tint.biasVector = CIVector(x: ink, y: ink, z: ink, w: 0)
+            if let caption = tint.outputImage {
+                let t = caption.extent
+                let moved = caption.transformed(by: CGAffineTransform(
+                    translationX: (canvas.width - t.width) / 2 - t.minX,
+                    y: (bottom - t.height) / 2 - t.minY))
+                out = moved.composited(over: out)
+            }
+        }
+        return out.cropped(to: canvas)
     }
 
     // MARK: Helpers

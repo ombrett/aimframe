@@ -165,6 +165,32 @@ struct ContentView: View {
             GeometryReader { geo in
                 overlay(in: geo.size)
             }
+            VStack {
+                if cam.mode == .landscape, cam.phase == .guiding || cam.phase == .locked, !cam.label.isEmpty {
+                    HStack(spacing: 8) {
+                        Text(cam.label)
+                            .foregroundColor(.white)
+                        if cam.phase == .locked {
+                            Text("Pronto")
+                                .foregroundColor(aimColor)
+                        }
+                    }
+                    .font(.system(size: 13, weight: .semibold, design: .rounded))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 6)
+                    .background(Color.black.opacity(0.5))
+                    .clipShape(Capsule())
+                    .padding(.top, 10)
+                }
+                Spacer()
+                if !cam.exposureText.isEmpty && cam.toast == nil {
+                    Text(cam.exposureText)
+                        .font(.system(size: 11, weight: .medium, design: .rounded))
+                        .monospacedDigit()
+                        .foregroundColor(Color.white.opacity(0.75))
+                        .padding(.bottom, 8)
+                }
+            }
             if cam.flash {
                 Color.white.opacity(0.8)
             }
@@ -256,14 +282,6 @@ struct ContentView: View {
                 .frame(width: box.width * w, height: box.height * h)
                 .position(x: cx, y: cy)
 
-            Text(cam.label)
-                .font(.system(size: 12, weight: .semibold, design: .rounded))
-                .foregroundColor(guideColor)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 3)
-                .background(Color.black.opacity(0.5))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .position(x: min(max(cx, 60), w - 60), y: min(box.maxY * h + 16, h - 14))
         }
     }
 

@@ -53,6 +53,14 @@ struct ReviewView: View {
                 }
                 .padding(.horizontal, 18)
 
+                Picker("Cornice", selection: Binding(get: { cam.frameStyle }, set: { cam.setFrameStyle($0) })) {
+                    Text("Senza cornice").tag(0)
+                    Text("Bianca").tag(1)
+                    Text("Nera").tag(2)
+                }
+                .pickerStyle(.segmented)
+                .padding(.horizontal, 16)
+
                 HStack(spacing: 12) {
                     Button {
                         cam.discardReview()
