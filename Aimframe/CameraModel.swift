@@ -10,6 +10,40 @@ enum GuidePhase {
     case free, guiding, locked, lost
 }
 
+enum AppMode: String, CaseIterable {
+    case landscape = "Paesaggio"
+    case outfit = "Outfit"
+}
+
+/// Reads the outfit corrections aloud, without talking over itself or repeating too often.
+final class Speaker {
+    private let synth = AVSpeechSynthesizer()
+    private var lastText = ""
+    private var lastTime: CFTimeInterval = 0
+    private var sessionReady = false
+
+    func say(_ text: String) {
+        let now = CACurrentMediaTime()
+        if synth.isSpeaking || now - lastTime < 2.0 { return }
+        if text == lastText && now - lastTime < 7 { return }
+        if !sessionReady {
+            sessionReady = true
+            try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try? AVAudioSession.sharedInstance().setActive(true)
+        }
+        lastText = text
+        lastTime = now
+        let utterance = AVSpeechUtterance(string: text)
+        utterance.voice = AVSpeechSynthesisVoice(language: "it-IT")
+        utterance.rate = 0.5
+        synth.speak(utterance)
+    }
+
+    func stop() {
+        synth.stopSpeaking(at: .immediate)
+    }
+}
+
 /// Camera, on-device AI (Apple Vision) and the aiming guide for the landscape mode.
 /// Published values are only changed on the main thread. Analysis state lives on `videoQueue`.
 final class CameraModel: NSObject, ObservableObject {
@@ -29,7 +63,20 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var toast: String?
     @Published var flash = false
 
+    // Outfit mode
+    @Published var mode: AppMode = .landscape
+    @Published var isFront = false
+    @Published var body: [Joint: CGPoint] = [:]
+    @Published var ghost: [Joint: CGPoint] = [:]
+    @Published var poseMatched = false
+    @Published var countdown: Int?
+    @Published var selectedPoseID = "free"
+    @Published var importedPose: RefPose?
+    @Published var voiceOn = true
+    @Published var autoShot = true
+
     let session = AVCaptureSession()
+    private let speaker = Speaker()
 
     // MARK: Camera
 
@@ -54,6 +101,20 @@ final class CameraModel: NSObject, ObservableObject {
     private var lostRun = 0
     private var locked = false
 
+    // MARK: Outfit state (videoQueue only)
+
+    private var vMode: AppMode = .landscape
+    private var vFront = false
+    private var vAutoShot = true
+    private var refPose: RefPose?
+    private var useMirror = false
+    private var frameCount = 0
+    private var poseHoldStart: CFTimeInterval?
+    private var countdownEnd: CFTimeInterval?
+    private var lastMatched: CFTimeInterval = 0
+    private var cooldownUntil: CFTimeInterval = 0
+    private var configured = false
+
     // MARK: Start
 
     func start() {
@@ -66,29 +127,40 @@ final class CameraModel: NSObject, ObservableObject {
     }
 
     private func configure() {
-        if device != nil {
+        if configured {
             if !session.isRunning { session.startRunning() }
             return
         }
-        let types: [AVCaptureDevice.DeviceType] = [.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera, .builtInWideAngleCamera]
-        let found = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: .back).devices
-        guard let cam = found.first, let input = try? AVCaptureDeviceInput(device: cam) else {
-            DispatchQueue.main.async { self.hint = "Nessuna fotocamera trovata." }
-            return
-        }
-
         session.beginConfiguration()
         session.sessionPreset = .photo
-        if session.canAddInput(input) { session.addInput(input) }
         if session.canAddOutput(photoOutput) { session.addOutput(photoOutput) }
         videoOutput.alwaysDiscardsLateVideoFrames = true
         videoOutput.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: Int(kCVPixelFormatType_420YpCbCr8BiPlanarFullRange)]
         videoOutput.setSampleBufferDelegate(self, queue: videoQueue)
         if session.canAddOutput(videoOutput) { session.addOutput(videoOutput) }
         session.commitConfiguration()
-
-        // Full iPhone quality: best processing and the largest photo size the lens offers.
         photoOutput.maxPhotoQualityPrioritization = .quality
+        configured = true
+        attachCamera(.back)
+        session.startRunning()
+    }
+
+    /// Puts the back or front camera on the session. Called on `sessionQueue`.
+    private func attachCamera(_ position: AVCaptureDevice.Position) {
+        let types: [AVCaptureDevice.DeviceType] = position == .back
+            ? [.builtInTripleCamera, .builtInDualWideCamera, .builtInDualCamera, .builtInWideAngleCamera]
+            : [.builtInTrueDepthCamera, .builtInWideAngleCamera]
+        let found = AVCaptureDevice.DiscoverySession(deviceTypes: types, mediaType: .video, position: position).devices
+        guard let cam = found.first, let input = try? AVCaptureDeviceInput(device: cam) else {
+            DispatchQueue.main.async { self.hint = "Nessuna fotocamera trovata." }
+            return
+        }
+        session.beginConfiguration()
+        for old in session.inputs { session.removeInput(old) }
+        if session.canAddInput(input) { session.addInput(input) }
+        session.commitConfiguration()
+
+        // Full iPhone quality: the largest photo size the lens offers.
         let sizes = cam.activeFormat.supportedMaxPhotoDimensions
         if let largest = sizes.max(by: { Int($0.width) * Int($0.height) < Int($1.width) * Int($1.height) }) {
             photoOutput.maxPhotoDimensions = largest
@@ -97,15 +169,25 @@ final class CameraModel: NSObject, ObservableObject {
         setPortrait(photoOutput.connection(with: .video))
 
         device = cam
+        wideFactor = 1
         var ultra = false
         if cam.deviceType == .builtInTripleCamera || cam.deviceType == .builtInDualWideCamera,
            let first = cam.virtualDeviceSwitchOverVideoZoomFactors.first {
             wideFactor = CGFloat(truncating: first)
             ultra = true
         }
-        DispatchQueue.main.async { self.hasUltraWide = ultra }
+        let front = position == .front
+        videoQueue.async { self.vFront = front }
+        DispatchQueue.main.async {
+            self.hasUltraWide = ultra
+            self.isFront = front
+        }
         applyZoom(display: 1, ramp: false)
-        session.startRunning()
+    }
+
+    func flipCamera() {
+        let next: AVCaptureDevice.Position = isFront ? .back : .front
+        sessionQueue.async { self.attachCamera(next) }
     }
 
     private func setPortrait(_ connection: AVCaptureConnection?) {
@@ -114,6 +196,11 @@ final class CameraModel: NSObject, ObservableObject {
             if connection.isVideoRotationAngleSupported(90) { connection.videoRotationAngle = 90 }
         } else if connection.isVideoOrientationSupported {
             connection.videoOrientation = .portrait
+        }
+        // The AI always sees the true picture; only the on-screen preview of the front camera is mirrored.
+        if connection.isVideoMirroringSupported {
+            connection.automaticallyAdjustsVideoMirroring = false
+            connection.isVideoMirrored = false
         }
     }
 
@@ -158,6 +245,7 @@ final class CameraModel: NSObject, ObservableObject {
     // MARK: Scan and guide
 
     func scanOrClear() {
+        guard mode == .landscape else { return }
         if phase == .free {
             hint = "Analizzo la scena…"
             videoQueue.async { self.wantScan = true }
@@ -330,6 +418,215 @@ final class CameraModel: NSObject, ObservableObject {
         CGRect(x: r.minX, y: 1 - r.maxY, width: r.width, height: r.height)
     }
 
+    // MARK: Outfit mode
+
+    func setMode(_ newMode: AppMode) {
+        guard newMode != mode else { return }
+        mode = newMode
+        speaker.stop()
+        body = [:]
+        ghost = [:]
+        poseMatched = false
+        countdown = nil
+        let needBack = newMode == .landscape && isFront
+        videoQueue.async {
+            self.clearGuide(message: newMode == .landscape ? "Tocca la scintilla per analizzare la scena" : "Mettiti a figura intera davanti alla fotocamera")
+            self.vMode = newMode
+            self.resetPoseTimers()
+        }
+        if needBack { sessionQueue.async { self.attachCamera(.back) } }
+    }
+
+    func selectPose(_ pose: RefPose?) {
+        selectedPoseID = pose?.id ?? "free"
+        ghost = [:]
+        videoQueue.async {
+            self.refPose = pose
+            self.useMirror = false
+            self.resetPoseTimers()
+        }
+    }
+
+    func setAutoShot(_ on: Bool) {
+        autoShot = on
+        videoQueue.async {
+            self.vAutoShot = on
+            self.resetPoseTimers()
+        }
+    }
+
+    func setVoice(_ on: Bool) {
+        voiceOn = on
+        if !on { speaker.stop() }
+    }
+
+    private func resetPoseTimers() {
+        poseHoldStart = nil
+        countdownEnd = nil
+    }
+
+    private static let jointNames: [VNHumanBodyPoseObservation.JointName: Joint] = [
+        .nose: .nose, .neck: .neck, .root: .root,
+        .leftShoulder: .lShoulder, .rightShoulder: .rShoulder,
+        .leftElbow: .lElbow, .rightElbow: .rElbow,
+        .leftWrist: .lWrist, .rightWrist: .rWrist,
+        .leftHip: .lHip, .rightHip: .rHip,
+        .leftKnee: .lKnee, .rightKnee: .rKnee,
+        .leftAnkle: .lAnkle, .rightAnkle: .rAnkle
+    ]
+
+    private static func joints(from observation: VNHumanBodyPoseObservation) -> [Joint: CGPoint] {
+        guard let points = try? observation.recognizedPoints(.all) else { return [:] }
+        var out: [Joint: CGPoint] = [:]
+        for (name, joint) in jointNames {
+            if let p = points[name], p.confidence > 0.3 { out[joint] = p.location }
+        }
+        return out
+    }
+
+    /// What is wrong with the framing of the whole figure, or nil when it is fine.
+    private func framingIssue(_ j: [Joint: CGPoint], neck: CGPoint, root: CGPoint, facing: Bool) -> String? {
+        let ankles = [j[.lAnkle], j[.rAnkle]].compactMap { $0 }
+        guard let bottom = ankles.map({ $0.y }).min() else { return "Non vedo i piedi: fai un passo indietro" }
+        let top = j[.nose]?.y ?? neck.y
+        if bottom < 0.04 { return "I piedi sono al bordo: fai un passo indietro" }
+        if top > 0.9 { return "La testa è al bordo: fai un passo indietro" }
+        if top - bottom < 0.45 { return "Sei lontano: avvicinati un po'" }
+        if root.x < 0.3 || root.x > 0.7 {
+            let towardsPictureRight = root.x < 0.3
+            let towardsPersonLeft = facing ? towardsPictureRight : !towardsPictureRight
+            return "Spostati un passo alla tua " + (towardsPersonLeft ? "sinistra" : "destra")
+        }
+        return nil
+    }
+
+    private func runPose(_ pixelBuffer: CVPixelBuffer) {
+        let request = VNDetectHumanBodyPoseRequest()
+        let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up, options: [:])
+        try? handler.perform([request])
+        let aspect = CGFloat(CVPixelBufferGetWidth(pixelBuffer)) / CGFloat(max(CVPixelBufferGetHeight(pixelBuffer), 1))
+        let now = CACurrentMediaTime()
+
+        var joints: [Joint: CGPoint] = [:]
+        if let observation = request.results?.first { joints = Self.joints(from: observation) }
+        guard let neck = joints[.neck], let root = joints[.root] else {
+            resetPoseTimers()
+            publishPose(body: [:], ghost: [:], matched: false, count: nil, hint: "Mettiti a figura intera davanti alla fotocamera", speak: false)
+            return
+        }
+
+        let facing = joints[.nose] != nil
+        var hint = "Inquadratura ok. Scatta quando vuoi."
+        var speak = false
+        var matched = false
+        var ghostJoints: [Joint: CGPoint] = [:]
+
+        if let issue = framingIssue(joints, neck: neck, root: root, facing: facing) {
+            hint = issue
+            speak = true
+        } else if let ref = refPose {
+            speak = true
+            let user = PoseMath.angles(joints, aspect: aspect)
+            let mirroredAngles = PoseMath.mirror(ref.angles)
+            let direct = PoseMath.compare(user: user, ref: ref.angles)
+            let flipped = PoseMath.compare(user: user, ref: mirroredAngles)
+            // The mirror image of a pose looks just as good, so follow whichever the person is closer to.
+            if useMirror {
+                if direct.score > flipped.score + 0.08 { useMirror = false }
+            } else if flipped.score > direct.score + 0.08 {
+                useMirror = true
+            }
+            let target = useMirror ? mirroredAngles : ref.angles
+            let result = useMirror ? flipped : direct
+            ghostJoints = PoseMath.ghost(joints: joints, ref: target, aspect: aspect)
+            matched = result.matched
+            if matched {
+                hint = "Perfetto, resta così"
+            } else if let limb = result.worst, let u = user[limb], let r = target[limb] {
+                hint = PoseMath.instruction(limb: limb, user: u, ref: r, joints: joints, facing: facing)
+            } else {
+                hint = "Mostrati a figura intera"
+            }
+        }
+
+        // Auto shot: hold the pose, three seconds of countdown, photo.
+        var count: Int?
+        if matched && vAutoShot && now > cooldownUntil {
+            lastMatched = now
+            if poseHoldStart == nil { poseHoldStart = now }
+            if countdownEnd == nil, let start = poseHoldStart, now - start > 0.7 { countdownEnd = now + 3 }
+        } else if now - lastMatched > 0.6 {
+            resetPoseTimers()
+        }
+        if let end = countdownEnd {
+            if now >= end {
+                resetPoseTimers()
+                cooldownUntil = now + 4
+                DispatchQueue.main.async { self.capture() }
+            } else {
+                count = Int((end - now).rounded(.up))
+            }
+        }
+
+        publishPose(body: joints, ghost: ghostJoints, matched: matched, count: count, hint: hint, speak: speak)
+    }
+
+    private func publishPose(body: [Joint: CGPoint], ghost: [Joint: CGPoint], matched: Bool, count: Int?, hint: String, speak: Bool) {
+        let front = vFront
+        func shown(_ joints: [Joint: CGPoint]) -> [Joint: CGPoint] {
+            var out: [Joint: CGPoint] = [:]
+            for (j, p) in joints { out[j] = CGPoint(x: front ? 1 - p.x : p.x, y: 1 - p.y) }
+            return out
+        }
+        let shownBody = shown(body), shownGhost = shown(ghost)
+        DispatchQueue.main.async {
+            guard self.mode == .outfit else { return }
+            self.body = shownBody
+            self.ghost = shownGhost
+            self.poseMatched = matched
+            self.countdown = count
+            self.hint = hint
+            if speak && self.voiceOn { self.speaker.say(hint) }
+        }
+    }
+
+    /// Reads the pose out of a photo the user picked, to use as the pose to copy.
+    func importInspiration(_ data: Data) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let picked = UIImage(data: data) else {
+                self.showToast("Non riesco ad aprire questa foto.")
+                return
+            }
+            // Redraw upright and smaller, so Vision sees the picture the way the user does.
+            let scale = min(1, 1280 / max(picked.size.width, picked.size.height))
+            let size = CGSize(width: max(1, picked.size.width * scale), height: max(1, picked.size.height * scale))
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = 1
+            let upright = UIGraphicsImageRenderer(size: size, format: format).image { _ in
+                picked.draw(in: CGRect(origin: .zero, size: size))
+            }
+            guard let cgImage = upright.cgImage else {
+                self.showToast("Non riesco ad aprire questa foto.")
+                return
+            }
+            let request = VNDetectHumanBodyPoseRequest()
+            try? VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:]).perform([request])
+            var joints: [Joint: CGPoint] = [:]
+            if let observation = request.results?.first { joints = Self.joints(from: observation) }
+            let angles = PoseMath.angles(joints, aspect: size.width / size.height)
+            guard angles.count >= 6 else {
+                self.showToast("In questa foto non trovo una persona a figura intera.")
+                return
+            }
+            let pose = RefPose(id: "import", name: "Ispirazione", angles: angles)
+            DispatchQueue.main.async {
+                self.importedPose = pose
+                self.selectPose(pose)
+                self.showToast("Posa copiata dalla foto")
+            }
+        }
+    }
+
     // MARK: Photo
 
     func capture() {
@@ -370,7 +667,10 @@ final class CameraModel: NSObject, ObservableObject {
 extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
         guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
-        if wantScan {
+        if vMode == .outfit {
+            frameCount += 1
+            if frameCount % 2 == 0 { runPose(pixelBuffer) }
+        } else if wantScan {
             wantScan = false
             runScan(pixelBuffer)
         } else if tracker != nil {

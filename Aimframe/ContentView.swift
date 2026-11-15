@@ -1,3 +1,4 @@
+import PhotosUI
 import SwiftUI
 
 private let aimColor = Color(red: 1.0, green: 0.77, blue: 0.24)
@@ -6,10 +7,14 @@ private let panelColor = Color(white: 0.11)
 
 struct ContentView: View {
     @StateObject private var cam = CameraModel()
+    @State private var pickerItem: PhotosPickerItem?
 
     private var guideColor: Color { cam.phase == .locked ? lockColor : aimColor }
 
     private var hintColor: Color {
+        if cam.mode == .outfit {
+            return cam.poseMatched ? lockColor : (cam.selectedPoseID == "free" && cam.ghost.isEmpty ? Color(white: 0.8) : aimColor)
+        }
         switch cam.phase {
         case .free: return Color(white: 0.65)
         case .guiding: return aimColor
@@ -25,10 +30,7 @@ struct ContentView: View {
             Color.black.ignoresSafeArea()
             if cam.authorized {
                 VStack(spacing: 12) {
-                    Text("Aimframe · Paesaggio")
-                        .font(.system(size: 15, weight: .semibold, design: .rounded))
-                        .foregroundColor(Color(white: 0.8))
-                        .padding(.top, 6)
+                    topBar
 
                     viewfinder
 
@@ -40,6 +42,7 @@ struct ContentView: View {
                         .padding(.horizontal, 16)
 
                     zoomRow
+                    if cam.mode == .outfit { poseRow }
                     Spacer(minLength: 0)
                     controls
                 }
@@ -53,6 +56,95 @@ struct ContentView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear { cam.start() }
+        .onChange(of: pickerItem) { item in
+            guard let item = item else { return }
+            Task {
+                let data = try? await item.loadTransferable(type: Data.self)
+                await MainActor.run {
+                    pickerItem = nil
+                    if let data = data { cam.importInspiration(data) }
+                }
+            }
+        }
+    }
+
+    private var topBar: some View {
+        HStack(spacing: 10) {
+            Picker("Modalità", selection: Binding(get: { cam.mode }, set: { cam.setMode($0) })) {
+                ForEach(AppMode.allCases, id: \.self) { mode in
+                    Text(mode.rawValue).tag(mode)
+                }
+            }
+            .pickerStyle(.segmented)
+            .frame(maxWidth: 230)
+
+            Spacer()
+
+            if cam.mode == .outfit {
+                toggleButton(on: cam.autoShot, symbolOn: "timer", symbolOff: "timer", label: "Autoscatto") {
+                    cam.setAutoShot(!cam.autoShot)
+                }
+                toggleButton(on: cam.voiceOn, symbolOn: "speaker.wave.2.fill", symbolOff: "speaker.slash.fill", label: "Voce") {
+                    cam.setVoice(!cam.voiceOn)
+                }
+            }
+        }
+        .padding(.horizontal, 14)
+        .padding(.top, 6)
+    }
+
+    private func toggleButton(on: Bool, symbolOn: String, symbolOff: String, label: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Image(systemName: on ? symbolOn : symbolOff)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundColor(on ? aimColor : Color(white: 0.5))
+                .frame(width: 38, height: 34)
+                .background(on ? Color(red: 0.17, green: 0.14, blue: 0.07) : panelColor)
+                .clipShape(RoundedRectangle(cornerRadius: 9))
+        }
+        .accessibilityLabel(label + (on ? " attivo" : " spento"))
+    }
+
+    private var poseRow: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 8) {
+                poseChip(title: "Libera", selected: cam.selectedPoseID == "free") { cam.selectPose(nil) }
+                if let imported = cam.importedPose {
+                    poseChip(title: "★ Ispirazione", selected: cam.selectedPoseID == imported.id) { cam.selectPose(imported) }
+                }
+                PhotosPicker(selection: $pickerItem, matching: .images) {
+                    chipLabel("＋ Da una foto", selected: false)
+                }
+                ForEach(PoseMath.library) { pose in
+                    poseChip(title: pose.name, selected: cam.selectedPoseID == pose.id) { cam.selectPose(pose) }
+                }
+            }
+            .padding(.horizontal, 14)
+        }
+    }
+
+    private func poseChip(title: String, selected: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) { chipLabel(title, selected: selected) }
+    }
+
+    private func chipLabel(_ title: String, selected: Bool) -> some View {
+        Text(title)
+            .font(.system(size: 13, weight: .medium, design: .rounded))
+            .foregroundColor(selected ? aimColor : Color(white: 0.75))
+            .padding(.horizontal, 12)
+            .frame(minHeight: 34)
+            .background(selected ? Color(red: 0.17, green: 0.14, blue: 0.07) : panelColor)
+            .clipShape(Capsule())
+    }
+
+    private func skeleton(_ joints: [Joint: CGPoint], in size: CGSize) -> Path {
+        var path = Path()
+        for (a, b) in PoseMath.bones {
+            guard let pa = joints[a], let pb = joints[b] else { continue }
+            path.move(to: CGPoint(x: pa.x * size.width, y: pa.y * size.height))
+            path.addLine(to: CGPoint(x: pb.x * size.width, y: pb.y * size.height))
+        }
+        return path
     }
 
     private var viewfinder: some View {
@@ -109,7 +201,26 @@ struct ContentView: View {
             .offset(x: w / 2, y: h / 2)
         }
 
-        if let box = cam.subjectBox, cam.phase == .guiding || cam.phase == .locked {
+        if cam.mode == .outfit {
+            // The pose to copy, drawn on the person's own body
+            if !cam.ghost.isEmpty {
+                skeleton(cam.ghost, in: size)
+                    .stroke((cam.poseMatched ? lockColor : aimColor).opacity(0.85),
+                            style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))
+            }
+            // What the AI sees of the body right now
+            skeleton(cam.body, in: size)
+                .stroke(Color.white.opacity(0.75), style: StrokeStyle(lineWidth: 2, lineCap: .round))
+            if let n = cam.countdown {
+                Text("\(n)")
+                    .font(.system(size: 120, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                    .shadow(color: .black.opacity(0.6), radius: 8)
+                    .position(x: w / 2, y: h / 2)
+            }
+        }
+
+        if cam.mode == .landscape, let box = cam.subjectBox, cam.phase == .guiding || cam.phase == .locked {
             let tx = cam.target.x * w, ty = cam.target.y * h
             let cx = box.midX * w, cy = box.midY * h
 
@@ -197,7 +308,7 @@ struct ContentView: View {
                 cam.capture()
             } label: {
                 ZStack {
-                    Circle().stroke(cam.phase == .locked ? lockColor : Color.white, lineWidth: 4)
+                    Circle().stroke((cam.phase == .locked || cam.poseMatched) ? lockColor : Color.white, lineWidth: 4)
                     Circle().fill(Color.white).padding(7)
                 }
                 .frame(width: 76, height: 76)
@@ -206,17 +317,31 @@ struct ContentView: View {
 
             Spacer()
 
-            Button {
-                cam.scanOrClear()
-            } label: {
-                Image(systemName: cam.phase == .free ? "sparkles" : "xmark")
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundColor(cam.phase == .free ? aimColor : .white)
-                    .frame(width: 56, height: 56)
-                    .background(cam.phase == .free ? panelColor : Color(white: 0.2))
-                    .clipShape(Circle())
+            if cam.mode == .landscape {
+                Button {
+                    cam.scanOrClear()
+                } label: {
+                    Image(systemName: cam.phase == .free ? "sparkles" : "xmark")
+                        .font(.system(size: 22, weight: .semibold))
+                        .foregroundColor(cam.phase == .free ? aimColor : .white)
+                        .frame(width: 56, height: 56)
+                        .background(cam.phase == .free ? panelColor : Color(white: 0.2))
+                        .clipShape(Circle())
+                }
+                .accessibilityLabel(cam.phase == .free ? "Analizza la scena" : "Togli la guida")
+            } else {
+                Button {
+                    cam.flipCamera()
+                } label: {
+                    Image(systemName: "arrow.triangle.2.circlepath.camera")
+                        .font(.system(size: 20, weight: .semibold))
+                        .foregroundColor(.white)
+                        .frame(width: 56, height: 56)
+                        .background(panelColor)
+                        .clipShape(Circle())
+                }
+                .accessibilityLabel("Cambia fotocamera")
             }
-            .accessibilityLabel(cam.phase == .free ? "Analizza la scena" : "Togli la guida")
         }
         .padding(.horizontal, 30)
         .padding(.bottom, 18)
