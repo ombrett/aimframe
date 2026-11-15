@@ -1,0 +1,32 @@
+name: Aimframe
+options:
+  bundleIdPrefix: com.aimframe
+  deploymentTarget:
+    iOS: "16.0"
+targets:
+  Aimframe:
+    type: application
+    platform: iOS
+    sources:
+      - Aimframe
+    info:
+      path: Aimframe/Info.plist
+      properties:
+        CFBundleDisplayName: Aimframe
+        CFBundleShortVersionString: "0.1"
+        CFBundleVersion: "1"
+        LSRequiresIPhoneOS: true
+        UILaunchScreen: {}
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        UIRequiredDeviceCapabilities:
+          - arm64
+        NSCameraUsageDescription: Aimframe usa la fotocamera per guidarti nell'inquadratura e scattare le foto.
+        NSPhotoLibraryAddUsageDescription: Aimframe salva nel rullino le foto che scatti.
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.aimframe.app
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGNING_ALLOWED: "NO"
+        CODE_SIGNING_REQUIRED: "NO"

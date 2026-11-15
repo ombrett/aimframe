@@ -1,0 +1,6 @@
+build/
+*.xcodeproj
+Payload/
+*.ipa
+build.log
+Aimframe/Info.plist

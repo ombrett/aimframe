@@ -1,0 +1,37 @@
+name: Build IPA
+on:
+  push:
+  workflow_dispatch:
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install XcodeGen
+        run: brew install xcodegen
+      - name: Generate project
+        run: xcodegen generate
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project Aimframe.xcodeproj -target Aimframe -configuration Release -sdk iphoneos \
+            SYMROOT="$PWD/build" CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log
+      - name: Show errors
+        if: failure()
+        run: |
+          grep -n -E "error:|BUILD FAILED" build.log | head -100 || true
+      - name: Package IPA
+        run: |
+          mkdir Payload
+          cp -R build/Release-iphoneos/Aimframe.app Payload/
+          zip -r Aimframe.ipa Payload
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Aimframe-ipa
+          path: Aimframe.ipa
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: build.log
