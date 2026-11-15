@@ -608,11 +608,25 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
-    /// Reads the pose out of a photo the user picked, to use as the pose to copy.
-    func importInspiration(_ data: Data) {
+    /// Stops the live analysis and the voice while another screen is on top of the camera.
+    func setPaused(_ on: Bool) {
+        if on { speaker.stop() }
+        videoQueue.async {
+            self.paused = on
+            self.resetPoseTimers()
+        }
+    }
+
+    /// Reads the pose out of a photo (from the camera roll, the clipboard or the web) to use as the pose to copy.
+    /// `completion` runs on the main thread with true when a whole figure was found.
+    func importInspiration(_ data: Data, completion: ((Bool) -> Void)? = nil) {
         DispatchQueue.global(qos: .userInitiated).async {
+            func fail(_ text: String) {
+                self.showToast(text)
+                DispatchQueue.main.async { completion?(false) }
+            }
             guard let picked = UIImage(data: data) else {
-                self.showToast("Non riesco ad aprire questa foto.")
+                fail("Non riesco ad aprire questa foto.")
                 return
             }
             // Redraw upright and smaller, so Vision sees the picture the way the user does.
@@ -624,7 +638,7 @@ final class CameraModel: NSObject, ObservableObject {
                 picked.draw(in: CGRect(origin: .zero, size: size))
             }
             guard let cgImage = upright.cgImage else {
-                self.showToast("Non riesco ad aprire questa foto.")
+                fail("Non riesco ad aprire questa foto.")
                 return
             }
             let request = VNDetectHumanBodyPoseRequest()
@@ -633,7 +647,7 @@ final class CameraModel: NSObject, ObservableObject {
             if let observation = request.results?.first { joints = Self.joints(from: observation) }
             let angles = PoseMath.angles(joints, aspect: size.width / size.height)
             guard angles.count >= 6 else {
-                self.showToast("In questa foto non trovo una persona a figura intera.")
+                fail("In questa foto non trovo una persona a figura intera.")
                 return
             }
             let pose = RefPose(id: "import", name: "Ispirazione", angles: angles)
@@ -641,8 +655,18 @@ final class CameraModel: NSObject, ObservableObject {
                 self.importedPose = pose
                 self.selectPose(pose)
                 self.showToast("Posa copiata dalla foto")
+                completion?(true)
             }
         }
+    }
+
+    /// Uses a picture the user copied in another app (Pinterest, Safari, Instagram).
+    func importFromClipboard() {
+        guard let image = UIPasteboard.general.image, let data = image.jpegData(compressionQuality: 0.9) else {
+            showToast("Negli appunti non c'è una foto. Copiala e riprova.")
+            return
+        }
+        importInspiration(data)
     }
 
     // MARK: Review and colour grade

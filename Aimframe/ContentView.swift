@@ -8,6 +8,7 @@ private let panelColor = Color(white: 0.11)
 struct ContentView: View {
     @StateObject private var cam = CameraModel()
     @State private var pickerItem: PhotosPickerItem?
+    @State private var showBrowser = false
 
     private var guideColor: Color { cam.phase == .locked ? lockColor : aimColor }
 
@@ -56,6 +57,9 @@ struct ContentView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear { cam.start() }
+        .sheet(isPresented: $showBrowser, onDismiss: { cam.setPaused(false) }) {
+            InspirationBrowser(cam: cam)
+        }
         .fullScreenCover(isPresented: Binding(get: { cam.reviewImage != nil }, set: { if !$0 { cam.discardReview() } })) {
             ReviewView(cam: cam)
         }
@@ -115,9 +119,14 @@ struct ContentView: View {
                 if let imported = cam.importedPose {
                     poseChip(title: "★ Ispirazione", selected: cam.selectedPoseID == imported.id) { cam.selectPose(imported) }
                 }
-                PhotosPicker(selection: $pickerItem, matching: .images) {
-                    chipLabel("＋ Da una foto", selected: false)
+                poseChip(title: "Cerca online", selected: false) {
+                    cam.setPaused(true)
+                    showBrowser = true
                 }
+                PhotosPicker(selection: $pickerItem, matching: .images) {
+                    chipLabel("＋ Dal rullino", selected: false)
+                }
+                poseChip(title: "Incolla", selected: false) { cam.importFromClipboard() }
                 ForEach(PoseMath.library) { pose in
                     poseChip(title: pose.name, selected: cam.selectedPoseID == pose.id) { cam.selectPose(pose) }
                 }
