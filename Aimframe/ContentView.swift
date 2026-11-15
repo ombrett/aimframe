@@ -56,6 +56,9 @@ struct ContentView: View {
         }
         .preferredColorScheme(.dark)
         .onAppear { cam.start() }
+        .fullScreenCover(isPresented: Binding(get: { cam.reviewImage != nil }, set: { if !$0 { cam.discardReview() } })) {
+            ReviewView(cam: cam)
+        }
         .onChange(of: pickerItem) { item in
             guard let item = item else { return }
             Task {

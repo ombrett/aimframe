@@ -1,5 +1,6 @@
 import AVFoundation
 import Combine
+import CoreImage
 import CoreMotion
 import ImageIO
 import Photos
@@ -75,6 +76,15 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var voiceOn = true
     @Published var autoShot = true
 
+    // Review after the shot
+    @Published var reviewImage: UIImage?
+    @Published var lookThumbs: [String: UIImage] = [:]
+    @Published var selectedLook = "teal"
+    @Published var recommendedLook = "teal"
+    @Published var recommendReason = ""
+    @Published var intensity: Double = 1
+    @Published var savingReview = false
+
     let session = AVCaptureSession()
     private let speaker = Speaker()
 
@@ -114,6 +124,14 @@ final class CameraModel: NSObject, ObservableObject {
     private var lastMatched: CFTimeInterval = 0
     private var cooldownUntil: CFTimeInterval = 0
     private var configured = false
+    private var paused = false                    // true while the review screen is open
+
+    // MARK: Review state
+
+    private let gradeQueue = DispatchQueue(label: "aimframe.grade", qos: .userInitiated)
+    private var reviewData: Data?                 // the untouched photo (gradeQueue)
+    private var reviewBase: CIImage?              // preview-sized copy (gradeQueue)
+    private var renderToken = 0
 
     // MARK: Start
 
@@ -627,6 +645,124 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
+    // MARK: Review and colour grade
+
+    /// Builds the preview, the look thumbnails and the recommendation for a fresh shot.
+    private func prepareReview(_ data: Data) {
+        guard let full = CIImage(data: data, options: [.applyOrientationProperty: true]) else {
+            saveToPhotos(data)
+            return
+        }
+        let base = Grade.scaled(full, maxSide: 1400)
+        let small = Grade.scaled(full, maxSide: 220)
+        let pick = Grade.recommend(small)
+        var thumbs: [String: UIImage] = [:]
+        for look in Grade.looks {
+            if let t = Grade.uiImage(Grade.render(small, look: look, intensity: 1)) { thumbs[look.id] = t }
+        }
+        guard let preview = Grade.uiImage(Grade.render(base, look: Grade.look(pick.id), intensity: 1)) else {
+            saveToPhotos(data)
+            return
+        }
+        reviewData = data
+        reviewBase = base
+        videoQueue.async { self.paused = true }
+        DispatchQueue.main.async {
+            self.speaker.stop()
+            self.lookThumbs = thumbs
+            self.recommendedLook = pick.id
+            self.recommendReason = pick.reason
+            self.selectedLook = pick.id
+            self.intensity = 1
+            self.savingReview = false
+            self.countdown = nil
+            self.reviewImage = preview
+        }
+    }
+
+    func selectLook(_ id: String) {
+        selectedLook = id
+        rerender()
+    }
+
+    func setIntensity(_ value: Double) {
+        intensity = value
+        rerender()
+    }
+
+    private func rerender() {
+        renderToken += 1
+        let token = renderToken
+        let id = selectedLook
+        let amount = CGFloat(intensity)
+        gradeQueue.async {
+            guard token == self.renderToken, let base = self.reviewBase,
+                  let image = Grade.uiImage(Grade.render(base, look: Grade.look(id), intensity: amount)) else { return }
+            DispatchQueue.main.async {
+                if token == self.renderToken && self.reviewImage != nil { self.reviewImage = image }
+            }
+        }
+    }
+
+    /// Applies the chosen look to the full-size photo and saves it to the camera roll.
+    func saveReview() {
+        guard reviewImage != nil, !savingReview else { return }
+        savingReview = true
+        let id = selectedLook
+        let amount = CGFloat(intensity)
+        gradeQueue.async {
+            guard let data = self.reviewData else {
+                self.closeReview()
+                return
+            }
+            var output = data                       // at 0% the original file is kept untouched
+            if amount >= 0.01, let full = CIImage(data: data, options: [.applyOrientationProperty: true]) {
+                let graded = Grade.render(full, look: Grade.look(id), intensity: amount)
+                let space = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
+                if let heif = Grade.context.heifRepresentation(of: graded, format: .RGBA8, colorSpace: space, options: [:]) {
+                    output = heif
+                } else if let jpeg = Grade.context.jpegRepresentation(of: graded, colorSpace: space, options: [:]) {
+                    output = jpeg
+                }
+            }
+            self.saveToPhotos(output)
+            self.closeReview()
+        }
+    }
+
+    func discardReview() {
+        gradeQueue.async { self.closeReview() }
+    }
+
+    private func closeReview() {
+        reviewData = nil
+        reviewBase = nil
+        videoQueue.async {
+            self.paused = false
+            self.resetPoseTimers()
+            self.cooldownUntil = CACurrentMediaTime() + 3
+        }
+        DispatchQueue.main.async {
+            self.reviewImage = nil
+            self.savingReview = false
+        }
+    }
+
+    private func saveToPhotos(_ data: Data) {
+        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
+            guard status == .authorized || status == .limited else {
+                self.showToast("Consenti l'accesso a Foto in Impostazioni per salvare.")
+                return
+            }
+            PHPhotoLibrary.shared().performChanges({
+                let request = PHAssetCreationRequest.forAsset()
+                request.addResource(with: .photo, data: data, options: nil)
+            }, completionHandler: { saved, _ in
+                self.showToast(saved ? "Salvata nel rullino" : "Salvataggio non riuscito")
+            })
+        }
+    }
+
     // MARK: Photo
 
     func capture() {
@@ -666,7 +802,7 @@ final class CameraModel: NSObject, ObservableObject {
 
 extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
     func captureOutput(_ output: AVCaptureOutput, didOutput sampleBuffer: CMSampleBuffer, from connection: AVCaptureConnection) {
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard !paused, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         if vMode == .outfit {
             frameCount += 1
             if frameCount % 2 == 0 { runPose(pixelBuffer) }
@@ -689,18 +825,6 @@ extension CameraModel: AVCapturePhotoCaptureDelegate {
         }
         let thumb = thumbnail(from: data)
         DispatchQueue.main.async { self.lastThumb = thumb }
-
-        PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
-            guard status == .authorized || status == .limited else {
-                self.showToast("Consenti l'accesso a Foto in Impostazioni per salvare.")
-                return
-            }
-            PHPhotoLibrary.shared().performChanges({
-                let request = PHAssetCreationRequest.forAsset()
-                request.addResource(with: .photo, data: data, options: nil)
-            }, completionHandler: { saved, _ in
-                self.showToast(saved ? "Salvata nel rullino" : "Salvataggio non riuscito")
-            })
-        }
+        gradeQueue.async { self.prepareReview(data) }
     }
 }
