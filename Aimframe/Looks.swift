@@ -68,21 +68,30 @@ enum Grade {
     }
 
     /// Film grain, sized so it looks the same on the preview and on the full photo.
+    /// The noise is turned into an opaque, nearly mid-grey layer and blended softly, so it can only
+    /// nudge each pixel a little lighter or darker and never shows up as white specks.
     private static func grain(_ image: CIImage, _ amount: CGFloat) -> CIImage {
         guard let noise = CIFilter.randomGenerator().outputImage else { return image }
         let size = max(1, max(image.extent.width, image.extent.height) / 1400)
-        let mono = CIFilter.colorMatrix()
-        mono.inputImage = noise.transformed(by: CGAffineTransform(scaleX: size, y: size))
-        mono.rVector = CIVector(x: 0, y: 1, z: 0, w: 0)
-        mono.gVector = CIVector(x: 0, y: 1, z: 0, w: 0)
-        mono.bVector = CIVector(x: 0, y: 1, z: 0, w: 0)
-        mono.aVector = CIVector(x: 0, y: 0, z: 0, w: 0)
-        mono.biasVector = CIVector(x: 0, y: 0, z: 0, w: amount)
-        guard let speckle = mono.outputImage?.cropped(to: image.extent) else { return image }
-        let over = CIFilter.sourceOverCompositing()
-        over.inputImage = speckle
-        over.backgroundImage = image
-        return over.outputImage ?? image
+        let black = CIImage(color: CIColor(red: 0, green: 0, blue: 0)).cropped(to: image.extent)
+        let opaque = noise
+            .transformed(by: CGAffineTransform(scaleX: size, y: size))
+            .cropped(to: image.extent)
+            .composited(over: black)
+        let spread = amount * 4                      // how far from mid-grey the grain may go
+        let grey = CIFilter.colorMatrix()
+        grey.inputImage = opaque
+        grey.rVector = CIVector(x: 0, y: spread, z: 0, w: 0)
+        grey.gVector = CIVector(x: 0, y: spread, z: 0, w: 0)
+        grey.bVector = CIVector(x: 0, y: spread, z: 0, w: 0)
+        grey.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
+        let level = 0.5 - 0.25 * spread
+        grey.biasVector = CIVector(x: level, y: level, z: level, w: 0)
+        guard let layer = grey.outputImage?.cropped(to: image.extent) else { return image }
+        let blend = CIFilter.softLightBlendMode()
+        blend.inputImage = layer
+        blend.backgroundImage = image
+        return blend.outputImage?.cropped(to: image.extent) ?? image
     }
 
     // MARK: The looks
@@ -164,13 +173,20 @@ enum Grade {
         let all = average(image, rect: e)
         let top = average(image, rect: CGRect(x: e.minX, y: e.minY + e.height * 0.66, width: e.width, height: e.height * 0.34))
         let light = (all.r + all.g + all.b) / 3
-        let mx = max(all.r, all.g, all.b), mn = min(all.r, all.g, all.b)
-        let colour = mx > 0 ? (mx - mn) / mx : 0
+        var colour: CGFloat = 0
+        for row in 0..<3 {
+            for col in 0..<3 {
+                let cell = average(image, rect: CGRect(x: e.minX + e.width * CGFloat(col) / 3, y: e.minY + e.height * CGFloat(row) / 3,
+                                                       width: e.width / 3, height: e.height / 3))
+                let mx = max(cell.r, cell.g, cell.b), mn = min(cell.r, cell.g, cell.b)
+                if mx > 0 { colour = max(colour, (mx - mn) / mx) }
+            }
+        }
 
         if light < 0.28 { return ("moody", "Scena scura: contrasto forte e ombre fredde") }
         if all.r > all.b * 1.25 { return ("golden", "Luce calda: la rendo più dorata") }
         if top.b > top.r * 1.15 { return ("teal", "Cielo in alto: azzurri profondi e toni caldi sul soggetto") }
-        if colour < 0.12 { return ("film", "Colori tenui: resa morbida da pellicola") }
+        if colour < 0.18 { return ("film", "Colori tenui: resa morbida da pellicola") }
         return ("teal", "Luce neutra: il classico look da cinema")
     }
 

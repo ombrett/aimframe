@@ -15,7 +15,7 @@ final class BrowserStore: ObservableObject {
         webView.allowsBackForwardNavigationGestures = true
     }
 
-    /// Words search Pinterest; something that starts with http opens that page.
+    /// A web address opens that page; anything else is searched on Google Images, which needs no account.
     func open(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
@@ -23,8 +23,20 @@ final class BrowserStore: ObservableObject {
             webView.load(URLRequest(url: url))
             return
         }
+        if !trimmed.contains(" "), trimmed.contains("."), let url = URL(string: "https://" + trimmed) {
+            webView.load(URLRequest(url: url))
+            return
+        }
+        var parts = URLComponents(string: "https://www.google.com/search")
+        parts?.queryItems = [URLQueryItem(name: "q", value: trimmed), URLQueryItem(name: "tbm", value: "isch")]
+        if let url = parts?.url { webView.load(URLRequest(url: url)) }
+    }
+
+    /// Pinterest itself. It asks for a Pinterest account before showing results.
+    func openPinterest(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         var parts = URLComponents(string: "https://www.pinterest.com/search/pins/")
-        parts?.queryItems = [URLQueryItem(name: "q", value: trimmed)]
+        parts?.queryItems = [URLQueryItem(name: "q", value: trimmed.isEmpty ? "outfit pose" : trimmed)]
         if let url = parts?.url { webView.load(URLRequest(url: url)) }
     }
 
@@ -92,14 +104,14 @@ struct InspirationBrowser: View {
     @ObservedObject var cam: CameraModel
     @Environment(\.dismiss) private var dismiss
     @StateObject private var store = BrowserStore()
-    @State private var query = "outfit pose"
+    @State private var query = "outfit pose figura intera"
 
     private let accent = Color(red: 1.0, green: 0.77, blue: 0.24)
 
     var body: some View {
         VStack(spacing: 0) {
             HStack(spacing: 8) {
-                TextField("Cerca su Pinterest o incolla un link", text: $query)
+                TextField("Cerca una posa o incolla un link", text: $query)
                     .textFieldStyle(.roundedBorder)
                     .autocorrectionDisabled(true)
                     .textInputAutocapitalization(.never)
@@ -108,12 +120,23 @@ struct InspirationBrowser: View {
                 Button("Chiudi") { dismiss() }
                     .foregroundColor(accent)
             }
-            .padding(10)
+            .padding(.horizontal, 10)
+            .padding(.top, 10)
+
+            HStack(spacing: 8) {
+                Button("Cerca su Google Immagini") { store.open(query) }
+                Button("Apri Pinterest") { store.openPinterest(query) }
+                Spacer()
+            }
+            .font(.system(size: 13, weight: .medium, design: .rounded))
+            .foregroundColor(accent)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
 
             WebViewHolder(webView: store.webView)
 
             VStack(spacing: 8) {
-                Text(store.message ?? "Apri la foto che ti piace, a figura intera, poi tocca il tasto.")
+                Text(store.message ?? "Tocca una foto per ingrandirla (persona a figura intera), poi tocca il tasto.")
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundColor(store.message == nil ? Color(white: 0.7) : Color(red: 1.0, green: 0.48, blue: 0.4))
                     .multilineTextAlignment(.center)
