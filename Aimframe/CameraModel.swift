@@ -82,6 +82,9 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var importedPose: RefPose?
     @Published var silhouette: UIImage?           // the person cut out of the inspiration photo
     @Published var silhouetteMirrored = false
+    @Published var referenceImage: UIImage?       // the inspiration photo itself, shown see-through
+    @Published var guideStyle = 0                 // 0 photo, 1 silhouette
+    @Published var guideOpacity: Double = 0.5
     @Published var voiceOn = true
     @Published var autoShot = true
 
@@ -146,6 +149,7 @@ final class CameraModel: NSObject, ObservableObject {
     private var vFront = false
     private var vAutoShot = true
     private var refPose: RefPose?
+    private var vPhotoGuide = false               // an inspiration photo is the guide: no full-figure checks
     private var useMirror = false
     private var frameCount = 0
     private var poseHoldStart: CFTimeInterval?
@@ -620,6 +624,8 @@ final class CameraModel: NSObject, ObservableObject {
 
     func selectPose(_ pose: RefPose?) {
         selectedPoseID = pose?.id ?? "free"
+        let photoGuide = pose?.id == "import"
+        videoQueue.async { self.vPhotoGuide = photoGuide }
         ghost = [:]
         videoQueue.async {
             self.refPose = pose
@@ -692,7 +698,8 @@ final class CameraModel: NSObject, ObservableObject {
         if let observation = request.results?.first { joints = Self.joints(from: observation) }
         guard let neck = joints[.neck], let root = joints[.root] else {
             resetPoseTimers()
-            publishPose(body: [:], ghost: [:], matched: false, count: nil, hint: "Mettiti a figura intera davanti alla fotocamera", speak: false)
+            let text = vPhotoGuide ? "Ricalca la foto guida e scatta" : "Mettiti a figura intera davanti alla fotocamera"
+            publishPose(body: [:], ghost: [:], matched: false, count: nil, hint: text, speak: false)
             return
         }
 
@@ -702,7 +709,11 @@ final class CameraModel: NSObject, ObservableObject {
         var matched = false
         var ghostJoints: [Joint: CGPoint] = [:]
 
-        if let issue = framingIssue(joints, neck: neck, root: root, facing: facing) {
+        let fullRef = (refPose?.angles.count ?? 0) >= 6
+        if vPhotoGuide && !fullRef {
+            // Half-length or partial inspiration: just line up with the photo and shoot by hand.
+            hint = "Ricalca la foto guida e scatta"
+        } else if !vPhotoGuide, let issue = framingIssue(joints, neck: neck, root: root, facing: facing) {
             hint = issue
             speak = true
         } else if let ref = refPose {
@@ -815,17 +826,17 @@ final class CameraModel: NSObject, ObservableObject {
             var joints: [Joint: CGPoint] = [:]
             if let observation = request.results?.first { joints = Self.joints(from: observation) }
             let angles = PoseMath.angles(joints, aspect: size.width / size.height)
-            guard angles.count >= 6 else {
-                fail("In questa foto non trovo una persona a figura intera.")
-                return
-            }
             let pose = RefPose(id: "import", name: "Ispirazione", angles: angles)
-            let shape = segmentation.results?.first.flatMap { Self.silhouetteImage(mask: $0.pixelBuffer, size: size) }
+            let shape = angles.isEmpty ? nil : segmentation.results?.first.flatMap { Self.silhouetteImage(mask: $0.pixelBuffer, size: size) }
+            let message = angles.count >= 6 ? "Foto guida pronta: posa riconosciuta"
+                : "Foto guida pronta: ricalcala e scatta tu"
             DispatchQueue.main.async {
+                self.referenceImage = upright
                 self.silhouette = shape
+                if shape == nil { self.guideStyle = 0 }
                 self.importedPose = pose
                 self.selectPose(pose)
-                self.showToast("Posa copiata dalla foto")
+                self.showToast(message)
                 completion?(true)
             }
         }

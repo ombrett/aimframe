@@ -43,7 +43,10 @@ struct ContentView: View {
                         .padding(.horizontal, 16)
 
                     zoomRow
-                    if cam.mode == .outfit { poseRow }
+                    if cam.mode == .outfit {
+                        poseRow
+                        if cam.selectedPoseID == "import" && cam.referenceImage != nil { guideControls }
+                    }
                     Spacer(minLength: 0)
                     controls
                 }
@@ -112,19 +115,44 @@ struct ContentView: View {
         .accessibilityLabel(label + (on ? " attivo" : " spento"))
     }
 
+    private var guideControls: some View {
+        HStack(spacing: 10) {
+            if cam.silhouette != nil {
+                Picker("Guida", selection: $cam.guideStyle) {
+                    Text("Foto").tag(0)
+                    Text("Sagoma").tag(1)
+                }
+                .pickerStyle(.segmented)
+                .frame(width: 140)
+            }
+            if cam.guideStyle == 0 {
+                Slider(value: $cam.guideOpacity, in: 0.1...0.9)
+                    .tint(aimColor)
+                Text("\(Int((cam.guideOpacity * 100).rounded()))%")
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundColor(Color(white: 0.7))
+                    .frame(width: 40, alignment: .trailing)
+            } else {
+                Spacer()
+            }
+        }
+        .padding(.horizontal, 16)
+    }
+
     private var poseRow: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 8) {
                 poseChip(title: "Libera", selected: cam.selectedPoseID == "free") { cam.selectPose(nil) }
                 if let imported = cam.importedPose {
-                    poseChip(title: "★ Ispirazione", selected: cam.selectedPoseID == imported.id) { cam.selectPose(imported) }
+                    poseChip(title: "★ Foto guida", selected: cam.selectedPoseID == imported.id) { cam.selectPose(imported) }
                 }
                 poseChip(title: "Cerca online", selected: false) {
                     cam.setPaused(true)
                     showBrowser = true
                 }
                 PhotosPicker(selection: $pickerItem, matching: .images) {
-                    chipLabel("＋ Dal rullino", selected: false)
+                    chipLabel("＋ Foto guida", selected: false)
                 }
                 poseChip(title: "Incolla", selected: false) { cam.importFromClipboard() }
                 ForEach(PoseMath.library) { pose in
@@ -271,19 +299,33 @@ struct ContentView: View {
         }
 
         if cam.mode == .outfit {
-            let showShape = cam.selectedPoseID == "import" && cam.silhouette != nil
-            // The inspiration's figure, fixed in the frame: step inside it
+            let importOn = cam.selectedPoseID == "import"
+            let showPhoto = importOn && cam.guideStyle == 0 && cam.referenceImage != nil
+            let showShape = importOn && cam.guideStyle == 1 && cam.silhouette != nil
+            // The inspiration photo, see-through, so the shot can be lined up with it
+            if showPhoto, let photo = cam.referenceImage {
+                Image(uiImage: photo)
+                    .resizable()
+                    .scaledToFill()
+                    .scaleEffect(x: cam.isFront ? -1 : 1, y: 1)
+                    .frame(width: w, height: h)
+                    .clipped()
+                    .opacity(cam.guideOpacity)
+                    .allowsHitTesting(false)
+            }
+            // Or only the person, cut out: step inside the figure
             if showShape, let shape = cam.silhouette {
                 Image(uiImage: shape)
                     .resizable()
-                    .scaledToFit()
+                    .scaledToFill()
                     .scaleEffect(x: cam.silhouetteMirrored ? -1 : 1, y: 1)
                     .frame(width: w, height: h)
+                    .clipped()
                     .opacity(cam.poseMatched ? 0.5 : 0.9)
                     .allowsHitTesting(false)
             }
             // Otherwise the pose to copy, drawn on the person's own body
-            if !showShape && !cam.ghost.isEmpty {
+            if !showShape && !showPhoto && !cam.ghost.isEmpty {
                 skeleton(cam.ghost, in: size)
                     .stroke((cam.poseMatched ? lockColor : aimColor).opacity(0.85),
                             style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))

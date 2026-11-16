@@ -136,14 +136,14 @@ struct InspirationBrowser: View {
             WebViewHolder(webView: store.webView)
 
             VStack(spacing: 8) {
-                Text(store.message ?? "Tocca una foto per ingrandirla (persona a figura intera), poi tocca il tasto.")
+                Text(store.message ?? "Tocca una foto per ingrandirla, poi tocca il tasto.")
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundColor(store.message == nil ? Color(white: 0.7) : Color(red: 1.0, green: 0.48, blue: 0.4))
                     .multilineTextAlignment(.center)
                 Button {
                     usePose()
                 } label: {
-                    Text(store.busy ? "Leggo la posa…" : "Usa questa posa")
+                    Text(store.busy ? "Preparo la guida…" : "Usa come foto guida")
                         .font(.system(size: 16, weight: .semibold, design: .rounded))
                         .foregroundColor(Color(red: 0.1, green: 0.08, blue: 0.01))
                         .frame(maxWidth: .infinity, minHeight: 48)
@@ -173,7 +173,7 @@ struct InspirationBrowser: View {
                 if found {
                     dismiss()
                 } else {
-                    store.message = "In questa foto non trovo una persona a figura intera. Provane un'altra."
+                    store.message = "Non riesco a usare questa foto. Provane un'altra."
                 }
             }
         }
