@@ -1,6 +1,7 @@
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import Foundation
+import ImageIO
 
 /// A colour grade: the "look" applied to a photo after the shot.
 struct Look: Identifiable {
@@ -316,6 +317,29 @@ enum Grade {
             }
         }
         return out.cropped(to: canvas)
+    }
+
+    // MARK: Export
+
+    /// The full-size photo with the look and frame, upright, as HEIF (JPEG if HEIF is unavailable).
+    /// EXIF and location data are carried over; the orientation tag is reset because the pixels are now upright.
+    /// With no look and no frame the original file is returned untouched.
+    static func export(_ data: Data, look id: String, intensity: Double, frame: Int) -> Data {
+        guard intensity >= 0.01 || frame != 0, let full = CIImage(data: data, options: [.applyOrientationProperty: true]) else { return data }
+        var graded = framed(render(full, look: look(id), intensity: CGFloat(intensity)), style: frame)
+        var props = full.properties
+        props[kCGImagePropertyOrientation as String] = 1
+        if var tiff = props[kCGImagePropertyTIFFDictionary as String] as? [String: Any] {
+            tiff[kCGImagePropertyTIFFOrientation as String] = 1
+            props[kCGImagePropertyTIFFDictionary as String] = tiff
+        }
+        props[kCGImagePropertyPixelWidth as String] = Int(graded.extent.width)
+        props[kCGImagePropertyPixelHeight as String] = Int(graded.extent.height)
+        graded = graded.settingProperties(props)
+        let space = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
+        if let heif = context.heifRepresentation(of: graded, format: .RGBA8, colorSpace: space, options: [:]) { return heif }
+        if let jpeg = context.jpegRepresentation(of: graded, colorSpace: space, options: [:]) { return jpeg }
+        return data
     }
 
     // MARK: Helpers

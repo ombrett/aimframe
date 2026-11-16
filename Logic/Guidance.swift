@@ -105,25 +105,20 @@ enum Aim {
 // MARK: - Automatic shot
 
 /// Takes one photo when the framing has been right and the phone still for long enough.
-/// After a shot it waits until the phone has turned to a new scene before it can fire again.
+/// After a shot it waits until the phone points somewhere else (by angle, not by shaking) before it can fire again.
 struct AutoShot {
     var hold: Double = 1.0                  // seconds of "ready and steady" before the shot
-    var rearmAngle: Double = 0.6            // radians of turning needed after a shot (about 35°)
+    var rearmAngle: Double = 0.6            // radians away from where the last photo was taken (about 35°)
 
     private(set) var progress: Double?      // 0...1 while counting, nil otherwise
     private(set) var armed = true
     private(set) var cancelled = false
     private var readySince: Double?
-    private var turned: Double = 0
 
-    /// Call with each motion sample: `rate` in rad/s, `dt` in seconds.
-    mutating func addRotation(rate: Double, dt: Double) {
-        guard !armed else { return }
-        turned += abs(rate) * max(0, min(dt, 0.2))
-        if turned >= rearmAngle {
-            armed = true
-            turned = 0
-        }
+    /// How far the phone now points from where it pointed at the last shot, in radians.
+    /// Hand tremor goes back and forth around zero, so it never re-arms.
+    mutating func observe(angleSinceShot: Double) {
+        if !armed && angleSinceShot >= rearmAngle { armed = true }
     }
 
     /// Returns true exactly when the photo should be taken.
@@ -139,7 +134,6 @@ struct AutoShot {
         let p = (now - start) / hold
         if p >= 1 {
             armed = false
-            turned = 0
             readySince = nil
             progress = nil
             return true
@@ -158,7 +152,6 @@ struct AutoShot {
     /// A manual shot counts as a shot: wait for a new scene before shooting automatically.
     mutating func didShootManually() {
         armed = false
-        turned = 0
         readySince = nil
         progress = nil
     }
@@ -168,7 +161,6 @@ struct AutoShot {
         cancelled = false
         readySince = nil
         progress = nil
-        turned = 0
     }
 }
 

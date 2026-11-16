@@ -104,3 +104,24 @@ struct ChipLabel: View {
 func openAppSettings() {
     if let url = URL(string: UIApplication.openSettingsURLString) { UIApplication.shared.open(url) }
 }
+
+/// Shown when Photos refused the save: the photo stays open and this says how to fix it.
+struct PhotosDeniedBanner: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundColor(Theme.red)
+            Text("Aimframe non può salvare in Foto. La foto resta qui.")
+                .font(Theme.small(12))
+                .foregroundColor(Theme.ivory)
+                .fixedSize(horizontal: false, vertical: true)
+            Spacer(minLength: 4)
+            Button("Impostazioni", action: openAppSettings)
+                .font(Theme.small(12))
+                .foregroundColor(Theme.yellow)
+        }
+        .padding(10)
+        .background(Theme.panel)
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .padding(.horizontal, 16)
+    }
+}

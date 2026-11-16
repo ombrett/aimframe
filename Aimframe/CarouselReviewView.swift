@@ -10,6 +10,7 @@ struct CarouselReviewView: View {
     @State private var previews: [UUID: UIImage] = [:]
     @State private var saving = false
     @State private var showOriginal = false
+    @State private var failed: String?
 
     var body: some View {
         ZStack {
@@ -52,6 +53,11 @@ struct CarouselReviewView: View {
                 .tabViewStyle(.page(indexDisplayMode: .always))
                 .frame(maxHeight: .infinity)
 
+                if cam.photosDenied {
+                    PhotosDeniedBanner()
+                } else if let failed = failed {
+                    Text(failed).font(Theme.small(12)).foregroundColor(Theme.red)
+                }
                 Text("Stesso look su tutte le foto, così il carosello è coerente. Tieni premuto per l'originale.")
                     .font(Theme.small(11))
                     .foregroundColor(Theme.ivoryDim)
@@ -93,10 +99,16 @@ struct CarouselReviewView: View {
 
                 Button {
                     saving = true
-                    cam.saveCarousel(look: look, intensity: intensity, frame: frame) { _ in
+                    cam.saveCarousel(look: look, intensity: intensity, frame: frame) { saved, total in
                         saving = false
-                        Haptics.success()
-                        cam.closeCarouselReview(clear: true)
+                        if saved == total {
+                            Haptics.success()
+                            cam.closeCarouselReview(clear: true)
+                        } else {
+                            // Keep the photos here: nothing is lost if Photos refused.
+                            Haptics.warning()
+                            failed = "Salvate \(saved) di \(total). Le foto restano qui: riprova."
+                        }
                     }
                 } label: {
                     Label(saving ? "Salvo…" : "Salva \(cam.carouselShots.count) foto in Foto", systemImage: "square.and.arrow.down.on.square")

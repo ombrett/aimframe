@@ -2,6 +2,7 @@ import CoreGraphics
 import CoreImage
 import CoreImage.CIFilterBuiltins
 import Foundation
+import ImageIO
 
 // Runs on the CI Mac before the app is built. Exercises the decision logic and the looks with
 // measured inputs, prints every result, and fails the build if a check fails.
@@ -62,11 +63,11 @@ do {
         t += 1.0 / 30
     }
     check(fires == 1, "auto: one shot per lock", "fires=\(fires)")
-    for _ in 0..<30 { a.addRotation(rate: 0.2, dt: 1.0 / 30) }      // 0.2 rad: not enough
+    a.observe(angleSinceShot: 0.2)                                  // 0.2 rad: not enough
     var again = 0
     for _ in 0..<60 { if a.update(now: t, ready: true, steady: true, enabled: true) { again += 1 }; t += 1.0 / 30 }
     check(again == 0 && !a.armed, "auto: a small turn does not re-arm")
-    for _ in 0..<60 { a.addRotation(rate: 0.5, dt: 1.0 / 30) }      // 1 rad: a new scene
+    a.observe(angleSinceShot: 1.0)                                  // 1 rad: a new scene
     check(a.armed, "auto: turning to a new scene re-arms")
     for _ in 0..<60 { if a.update(now: t, ready: true, steady: true, enabled: true) { again += 1 }; t += 1.0 / 30 }
     check(again == 1, "auto: shoots again on the new scene", "fires=\(again)")
@@ -93,6 +94,18 @@ do {
     _ = c.update(now: t, ready: false, steady: true, enabled: true)
     for _ in 0..<40 { if c.update(now: t, ready: true, steady: true, enabled: true) { cancelledFires += 1 }; t += 1.0 / 30 }
     check(cancelledFires == 1, "auto: after losing and finding the framing it works again")
+
+    // 15 s of hand tremor and taps: the angle wobbles around the shot position and never re-arms.
+    var j = AutoShot()
+    var jt = 0.0
+    var firedOnce = false
+    for _ in 0..<45 { if j.update(now: jt, ready: true, steady: true, enabled: true) { firedOnce = true }; jt += 1.0 / 30 }
+    for i in 0..<450 {
+        j.observe(angleSinceShot: 0.08 + 0.07 * sin(Double(i) * 0.9))
+        _ = j.update(now: jt, ready: true, steady: true, enabled: true)
+        jt += 1.0 / 30
+    }
+    check(firedOnce && !j.armed, "auto: 15 s of jitter on the same scene does not re-arm")
 
     var d = AutoShot()
     d.didShootManually()
@@ -333,6 +346,59 @@ do {
 
     let advice = Grade.recommend(Grade.scaled(small, maxSide: 220))
     check(!advice.reason.isEmpty && Grade.looks.contains(where: { $0.id == advice.id }), "advice: names a real look with a measured reason", advice.reason)
+}
+
+// MARK: Export of real files (orientation, mirroring, size, metadata)
+
+func jpegData(_ image: CIImage, orientation: Int, lens: String) -> Data {
+    let cg = ctx.createCGImage(image, from: image.extent)!
+    let out = NSMutableData()
+    let dest = CGImageDestinationCreateWithData(out, "public.jpeg" as CFString, 1, nil)!
+    let props: [String: Any] = [
+        kCGImagePropertyOrientation as String: orientation,
+        kCGImagePropertyExifDictionary as String: [kCGImagePropertyExifLensModel as String: lens]
+    ]
+    CGImageDestinationAddImage(dest, cg, props as CFDictionary)
+    CGImageDestinationFinalize(dest)
+    return out as Data
+}
+
+do {
+    // Stored sideways (landscape pixels) with the sky on the left and orientation 6:
+    // shown upright, the sky must end up at the top and the photo must be portrait.
+    let upright = card(width: 300, height: 400)
+    let sideways = upright.oriented(.right)                    // the pixels a phone stores for a portrait shot
+    let raw = jpegData(sideways.transformed(by: CGAffineTransform(translationX: -sideways.extent.minX, y: -sideways.extent.minY)),
+                       orientation: 6, lens: "TestLens")
+    for (frame, label) in [(0, "no frame"), (1, "white frame")] {
+        let out = Grade.export(raw, look: "teal", intensity: 1, frame: frame)
+        let back = CIImage(data: out, options: [.applyOrientationProperty: true])!
+        let e = back.extent
+        check(e.height > e.width, "export (\(label)): rotated photo comes out portrait", "\(Int(e.width))x\(Int(e.height))")
+        let top = Grade.average(back, rect: CGRect(x: e.width * 0.3, y: e.height * 0.9, width: e.width * 0.4, height: e.height * 0.05))
+        check(top.b > top.r, "export (\(label)): sky at the top after re-opening the file")
+        if frame == 0 {
+            check(Int(e.width) == 300 && Int(e.height) == 400, "export: same pixel size as the original")
+        }
+        let src = CGImageSourceCreateWithData(out as CFData, nil)!
+        let meta = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [String: Any] ?? [:]
+        let exif = meta[kCGImagePropertyExifDictionary as String] as? [String: Any] ?? [:]
+        check((exif[kCGImagePropertyExifLensModel as String] as? String) == "TestLens", "export (\(label)): EXIF kept")
+        let orient = meta[kCGImagePropertyOrientation as String] as? Int ?? 1
+        check(orient == 1, "export (\(label)): orientation tag reset to upright", "\(orient)")
+    }
+
+    // A mirrored selfie (orientation 2): a red mark on the left of the stored pixels must appear on the right.
+    let plain = CIImage(color: CIColor(red: 0.5, green: 0.5, blue: 0.5)).cropped(to: CGRect(x: 0, y: 0, width: 300, height: 400))
+    let mark = CIImage(color: CIColor(red: 0.9, green: 0.1, blue: 0.1)).cropped(to: CGRect(x: 0, y: 150, width: 60, height: 100))
+    let mirroredRaw = jpegData(mark.composited(over: plain), orientation: 2, lens: "Front")
+    let mout = CIImage(data: Grade.export(mirroredRaw, look: "clean", intensity: 1, frame: 0), options: [.applyOrientationProperty: true])!
+    let right = Grade.average(mout, rect: CGRect(x: 250, y: 170, width: 40, height: 60))
+    let left = Grade.average(mout, rect: CGRect(x: 10, y: 170, width: 40, height: 60))
+    check(right.r > right.g + 0.3 && left.r < left.g + 0.1, "export: mirrored selfie keeps the mirror")
+
+    let untouched = Grade.export(raw, look: "teal", intensity: 0, frame: 0)
+    check(untouched == raw, "export: no look and no frame keeps the original file byte for byte")
 }
 
 print("\n\(passes) passed, \(failures) failed")

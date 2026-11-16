@@ -38,6 +38,7 @@ struct ReviewView: View {
                 .multilineTextAlignment(.center)
                 .padding(.horizontal, 18)
 
+                if cam.photosDenied { PhotosDeniedBanner() }
                 looks
                 intensityRow
 

@@ -170,6 +170,9 @@ final class CameraModel: NSObject, ObservableObject {
     private var overlayOpen = false
     private var active = true
     private var captureKind: AppMode = .landscape
+    private var captureStep: CarouselStep = .full
+    private var captureInFlight = false
+    private var shotAttitude: CMAttitude?        // where the phone pointed at the last shot
 
     // MARK: Video-queue state
 
@@ -189,7 +192,8 @@ final class CameraModel: NSObject, ObservableObject {
     private var anchor = CGPoint(x: 0.5, y: 0.5)
     private var zoomMult: CGFloat = 1
     private var zoomStarted = false
-    private var zoomChanged = false
+    private var homeZoom: CGFloat?              // zoom before the guide zoomed in; restored when the guide ends
+    private var scanNotBefore: CFTimeInterval = 0
     private var baseZoom: CGFloat = 1
     private var lockRun = 0
     private var lostRun = 0
@@ -244,6 +248,7 @@ final class CameraModel: NSObject, ObservableObject {
 
     /// Asks for the camera (after the onboarding) and starts it.
     func start() {
+        setPaused(false)
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             status = .granted
@@ -430,21 +435,27 @@ final class CameraModel: NSObject, ObservableObject {
             let across = (g.x * g.x + g.y * g.y).squareRoot()
             self.roll = across > 0.35 ? atan2(g.x, -g.y) : nil
             let r = data.rotationRate
-            self.tickAuto(rate: (r.x * r.x + r.y * r.y + r.z * r.z).squareRoot())
+            self.tickAuto(rate: (r.x * r.x + r.y * r.y + r.z * r.z).squareRoot(), attitude: data.attitude)
         }
     }
 
-    private func tickAuto(rate: Double) {
+    private func tickAuto(rate: Double, attitude: CMAttitude) {
         let now = CACurrentMediaTime()
-        let dt = lastMotion == 0 ? 1.0 / 30 : now - lastMotion
         lastMotion = now
-        auto.addRotation(rate: rate, dt: dt)
         let still = rate < 0.12
         if !still { steadySince = now }
 
-        guard active, autoShot, reviewImage == nil, !overlayOpen, !carouselReviewOpen, mode != .outfit else {
+        guard active, autoShot, reviewImage == nil, !overlayOpen, !carouselReviewOpen, !captureInFlight, mode != .outfit else {
             if autoProgress != nil { autoProgress = nil }
+            steadySince = now
             return
+        }
+        // Re-arm only once the phone points somewhere else than at the last shot.
+        if let shot = shotAttitude {
+            guard let turned = attitude.copy() as? CMAttitude else { return }
+            turned.multiply(byInverseOf: shot)
+            let w = min(1, abs(turned.quaternion.w))
+            auto.observe(angleSinceShot: 2 * acos(w))
         }
         switch mode {
         case .landscape:
@@ -481,10 +492,9 @@ final class CameraModel: NSObject, ObservableObject {
     /// Shows an instruction, steadied so it does not flicker; speaks it if it is for the person posing.
     private func show(_ next: Instruction, urgent: Bool = false) {
         let shown = stabilizer.update(next, now: CACurrentMediaTime(), urgent: urgent)
-        if shown != instruction {
-            instruction = shown
-            if voiceOn && mode != .landscape && shown.audience == .subject { speaker.say(shown.text) }
-        }
+        if shown != instruction { instruction = shown }
+        // Offered on every update: the speaker itself waits its turn and avoids repeating within 8 s.
+        if voiceOn && mode != .landscape && shown.audience == .subject && reviewImage == nil { speaker.say(shown.text) }
     }
 
     // MARK: Zoom
@@ -492,6 +502,7 @@ final class CameraModel: NSObject, ObservableObject {
     /// `display` is what the user sees: 0.5, 1, 2, 3…
     func setZoom(display: CGFloat) {
         Haptics.selection()
+        videoQueue.async { self.homeZoom = nil }            // the user chose this zoom: keep it
         sessionQueue.async { self.applyZoom(display: display, ramp: true) }
     }
 
@@ -534,7 +545,10 @@ final class CameraModel: NSObject, ObservableObject {
         guard mode == .landscape else { return }
         phase = .scanning
         show(.info("Analizzo la scena…"), urgent: true)
-        videoQueue.async { self.wantScan = true }
+        videoQueue.async {
+            self.resetTracking(restoreZoom: true)
+            self.wantScan = true
+        }
     }
 
     private func clearGuide() {
@@ -559,11 +573,11 @@ final class CameraModel: NSObject, ObservableObject {
         smoothBox = nil
         meterBox = nil
         aimAxis = nil
-        if restoreZoom && zoomChanged {
-            let back = baseZoom
+        if restoreZoom, let back = homeZoom {
+            homeZoom = nil
+            scanNotBefore = CACurrentMediaTime() + 0.8      // let the zoom settle before the next scan
             sessionQueue.async { self.applyZoom(display: back, ramp: true) }
         }
-        zoomChanged = false
         zoomStarted = false
     }
 
@@ -604,7 +618,6 @@ final class CameraModel: NSObject, ObservableObject {
         let mult = min(max(0.45 / max(box.width, box.height), 1), 2.5)
         zoomMult = mult < 1.3 ? 1 : mult
         zoomStarted = false
-        zoomChanged = false
         baseZoom = currentDisplayZoom()
         lockRun = 0
         lostRun = 0
@@ -672,7 +685,7 @@ final class CameraModel: NSObject, ObservableObject {
             let fitsY = abs(box.midY - 0.5) * m + box.height * m / 2 < 0.46
             if fitsX && fitsY {
                 zoomStarted = true
-                zoomChanged = true
+                if homeZoom == nil { homeZoom = baseZoom }
                 let goal = min(baseZoom * m, min(zoomPresetsMax(), 3))
                 sessionQueue.async { self.applyZoom(display: goal, ramp: true) }
             }
@@ -1163,10 +1176,9 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
-    private func addCarouselShot(_ data: Data) {
+    private func addCarouselShot(_ data: Data, step: CarouselStep) {
         let thumb = Self.thumbnail(from: data, size: 360)
         DispatchQueue.main.async {
-            let step = self.carouselStep
             self.carouselShots.removeAll { $0.step == step }
             self.carouselShots.append(CarouselShot(step: step, data: data, thumb: thumb))
             self.carouselShots.sort { $0.step.rawValue < $1.step.rawValue }
@@ -1193,23 +1205,30 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
-    /// Saves the whole carousel, one full-size photo at a time to keep memory low.
-    func saveCarousel(look: String, intensity: Double, frame: Int, completion: @escaping (Int) -> Void) {
+    /// Saves the whole carousel, one full-size photo at a time to keep memory low,
+    /// and reports how many Photos really accepted.
+    func saveCarousel(look: String, intensity: Double, frame: Int, completion: @escaping (Int, Int) -> Void) {
         let shots = carouselShots
         let keep = keepCopy
         gradeQueue.async {
             var saved = 0
             for shot in shots {
+                let done = DispatchSemaphore(value: 0)
+                var ok = false
                 autoreleasepool {
-                    let output = Self.export(shot.data, look: look, intensity: intensity, frame: frame)
-                    self.saveToPhotos(output, quiet: true)
-                    if keep { GalleryStore.shared.add(output) }
-                    saved += 1
+                    let output = Grade.export(shot.data, look: look, intensity: intensity, frame: frame)
+                    self.saveToPhotos(output, quiet: true) { result in
+                        ok = result
+                        if result && keep { GalleryStore.shared.add(output) }
+                        done.signal()
+                    }
                 }
+                done.wait()
+                if ok { saved += 1 } else { break }
             }
             DispatchQueue.main.async {
-                self.showToast("Carosello salvato: \(saved) foto")
-                completion(saved)
+                if saved == shots.count { self.showToast("Carosello salvato: \(saved) foto") }
+                completion(saved, shots.count)
             }
         }
     }
@@ -1293,16 +1312,6 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
-    /// The full-size photo with the look and frame. With no look and no frame the original file is kept as it is.
-    private static func export(_ data: Data, look: String, intensity: Double, frame: Int) -> Data {
-        guard intensity >= 0.01 || frame != 0, let full = CIImage(data: data, options: [.applyOrientationProperty: true]) else { return data }
-        let graded = Grade.framed(Grade.render(full, look: Grade.look(look), intensity: CGFloat(intensity)), style: frame)
-        let space = CGColorSpace(name: CGColorSpace.displayP3) ?? CGColorSpaceCreateDeviceRGB()
-        if let heif = Grade.context.heifRepresentation(of: graded, format: .RGBA8, colorSpace: space, options: [:]) { return heif }
-        if let jpeg = Grade.context.jpegRepresentation(of: graded, colorSpace: space, options: [:]) { return jpeg }
-        return data
-    }
-
     func saveReview() {
         guard reviewImage != nil, !savingReview else { return }
         savingReview = true
@@ -1315,11 +1324,20 @@ final class CameraModel: NSObject, ObservableObject {
                 self.closeReview()
                 return
             }
-            let output = Self.export(data, look: id, intensity: amount, frame: style)
-            self.saveToPhotos(output, quiet: false)
-            if keep { GalleryStore.shared.add(output) }
-            self.closeReview()
-            DispatchQueue.main.async { Haptics.success() }
+            let output = Grade.export(data, look: id, intensity: amount, frame: style)
+            self.saveToPhotos(output, quiet: false) { saved in
+                if saved {
+                    if keep { GalleryStore.shared.add(output) }
+                    self.gradeQueue.async { self.closeReview() }
+                    DispatchQueue.main.async { Haptics.success() }
+                } else {
+                    // Keep the photo open so nothing is lost; the review shows how to allow access.
+                    DispatchQueue.main.async {
+                        self.savingReview = false
+                        Haptics.warning()
+                    }
+                }
+            }
         }
     }
 
@@ -1343,18 +1361,21 @@ final class CameraModel: NSObject, ObservableObject {
         }
     }
 
-    private func saveToPhotos(_ data: Data, quiet: Bool) {
+    /// Writes to Photos and reports whether it really happened.
+    private func saveToPhotos(_ data: Data, quiet: Bool, completion: ((Bool) -> Void)? = nil) {
         PHPhotoLibrary.requestAuthorization(for: .addOnly) { status in
             guard status == .authorized || status == .limited else {
                 DispatchQueue.main.async { self.photosDenied = true }
-                self.showToast("Non posso salvare in Foto: consenti l'accesso in Impostazioni")
+                completion?(false)
                 return
             }
+            DispatchQueue.main.async { self.photosDenied = false }
             PHPhotoLibrary.shared().performChanges({
                 let request = PHAssetCreationRequest.forAsset()
                 request.addResource(with: .photo, data: data, options: nil)
             }, completionHandler: { saved, _ in
-                if !quiet || !saved { self.showToast(saved ? "Salvata in Foto" : "Salvataggio non riuscito") }
+                if !quiet || !saved { self.showToast(saved ? "Salvata in Foto" : "Salvataggio non riuscito: riprova") }
+                completion?(saved)
             })
         }
     }
@@ -1363,16 +1384,22 @@ final class CameraModel: NSObject, ObservableObject {
 
     /// The shutter button and the automatic shot.
     func capture(automatic: Bool = false) {
-        guard status == .granted, reviewImage == nil else { return }
+        guard status == .granted, reviewImage == nil, !captureInFlight else { return }
         if !automatic { auto.didShootManually() }
+        shotAttitude = motion.deviceMotion?.attitude.copy() as? CMAttitude
+        captureInFlight = true
         autoProgress = nil
         captureKind = mode
+        captureStep = carouselStep
         flash = true
         Haptics.shutter()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { self.flash = false }
         sessionQueue.async {
             guard self.session.isRunning else {
-                DispatchQueue.main.async { self.showToast("La fotocamera non è pronta") }
+                DispatchQueue.main.async {
+                    self.captureInFlight = false
+                    self.showToast("La fotocamera non è pronta")
+                }
                 return
             }
             let settings = AVCapturePhotoSettings()
@@ -1415,7 +1442,7 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         frameCount += 1
         switch vMode {
         case .landscape:
-            if wantScan {
+            if wantScan && CACurrentMediaTime() >= scanNotBefore && !(device?.isRampingVideoZoom ?? false) {
                 wantScan = false
                 runScan(pixelBuffer)
             } else if tracker != nil && frameCount % analysisEvery == 0 {
@@ -1434,14 +1461,17 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
 extension CameraModel: AVCapturePhotoCaptureDelegate {
     func photoOutput(_ output: AVCapturePhotoOutput, didFinishProcessingPhoto photo: AVCapturePhoto, error: Error?) {
         guard error == nil, let data = photo.fileDataRepresentation() else {
+            DispatchQueue.main.async { self.captureInFlight = false }
             showToast("Scatto non riuscito. Riprova.")
             return
         }
         let thumb = Self.thumbnail(from: data)
         DispatchQueue.main.async {
             self.lastThumb = thumb
+            self.captureInFlight = false
             if self.captureKind == .carousel {
-                self.gradeQueue.async { self.addCarouselShot(data) }
+                let step = self.captureStep
+                self.gradeQueue.async { self.addCarouselShot(data, step: step) }
             } else {
                 self.gradeQueue.async { self.prepareReview(data) }
             }
