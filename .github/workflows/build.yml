@@ -9,6 +9,20 @@ jobs:
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Logic tests (run on the Mac)
+        run: |
+          set -o pipefail
+          mkdir -p ci-out
+          swiftc -O -o logictests Logic/*.swift Tests/main.swift 2>&1 | tee logic-build.log
+          ./logictests ci-out 2>&1 | tee ci-out/logic-tests.txt
+      - name: Publish test renders
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          ls ci-out || true
+          gh release delete ci-renders --yes --cleanup-tag || true
+          gh release create ci-renders ci-out/* --prerelease --title "CI renders" --notes "Test renders for ${{ github.sha }} (${{ github.ref_name }})" --target "${{ github.sha }}" || true
       - name: Install XcodeGen
         run: brew install xcodegen
       - name: Generate project
@@ -23,6 +37,11 @@ jobs:
         if: failure()
         run: |
           grep -n -E "error:|BUILD FAILED" build.log | head -100 || true
+      - name: Check icon and bundle
+        run: |
+          APP=build/Release-iphoneos/Aimframe.app
+          plutil -p "$APP/Info.plist" | grep -i -A4 icon || true
+          ls "$APP" | grep -i -E "AppIcon|Assets.car" || true
       - name: Package IPA
         run: |
           mkdir Payload
