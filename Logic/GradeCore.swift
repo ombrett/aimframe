@@ -76,9 +76,9 @@ enum Grade {
         let f = CIFilter.vignetteEffect()
         f.inputImage = image
         f.center = CGPoint(x: e.midX, y: e.midY)
-        f.radius = Float(hypot(e.width, e.height) / 2 * 0.75)
+        f.radius = Float(hypot(e.width, e.height) / 2 * 0.95)
         f.intensity = amount
-        f.falloff = 0.6
+        f.falloff = 0.45
         return f.outputImage?.cropped(to: e) ?? image
     }
 
@@ -93,7 +93,7 @@ enum Grade {
             .transformed(by: CGAffineTransform(scaleX: size, y: size))
             .cropped(to: image.extent)
             .composited(over: black)
-        let spread = amount * 4                      // how far from mid-grey the grain may go
+        let spread = amount * 2.2                    // how far from mid-grey the grain may go
         let grey = CIFilter.colorMatrix()
         grey.inputImage = opaque
         grey.rVector = CIVector(x: 0, y: spread, z: 0, w: 0)
@@ -131,12 +131,12 @@ enum Grade {
                     // Skin: orange-red hues, moderate saturation, not too dark.
                     let hueW = smooth(hue, 0, 8) * (1 - smooth(hue, 45, 60))
                     let satW = smooth(sat, 0.12, 0.2) * (1 - smooth(sat, 0.6, 0.75))
-                    let valW = smooth(mx, 0.2, 0.35)
+                    let valW = smooth(mx, 0.1, 0.22)
                     let skin = hueW * satW * valW
                     // Highlights: close to white.
                     let luma = 0.2126 * R + 0.7152 * G + 0.0722 * B
                     let high = smooth(luma, 0.86, 0.97)
-                    let m = max(skin * 0.55, high * 0.8)
+                    let m = max(skin * 0.7, high * 0.8)
                     let i = (b * n * n + g * n + r) * 4
                     values[i] = m; values[i + 1] = m; values[i + 2] = m; values[i + 3] = 1
                 }
@@ -168,42 +168,42 @@ enum Grade {
 
     static let looks: [Look] = [
         Look(id: "teal", name: "Teal & Orange", protects: true) { image in
-            var i = tone(image, r: [-0.015, 0.96, 0.07], g: [0, 1, 0], b: [0.03, 1.0, -0.07])
-            i = controls(i, saturation: 1.06, contrast: 1.05)
-            i = curve(i, blacks: 0.02, low: 0.22, high: 0.79, whites: 0.98)
-            i = vignette(i, 0.35)
+            var i = tone(image, r: [-0.006, 0.97, 0.045], g: [0, 1, 0], b: [0.014, 1.0, -0.045])
+            i = controls(i, saturation: 1.05, contrast: 1.05)
+            i = curve(i, blacks: 0.02, low: 0.225, high: 0.785, whites: 0.98)
+            i = vignette(i, 0.2)
             return grain(i, 0.02)
         },
         Look(id: "golden", name: "Golden Hour", protects: true) { image in
             var i = gains(image, r: 1.05, g: 1.01, b: 0.92)
             i = controls(i, saturation: 1.08, contrast: 1.03)
             i = curve(i, blacks: 0.025, low: 0.235, high: 0.785, whites: 0.98)
-            i = vignette(i, 0.25)
+            i = vignette(i, 0.15)
             return grain(i, 0.018)
         },
         Look(id: "film", name: "Pellicola", protects: true) { image in
             var i = gains(image, r: 1.025, g: 1.0, b: 0.975)
             i = controls(i, saturation: 0.88, contrast: 0.97)
             i = curve(i, blacks: 0.06, low: 0.245, high: 0.77, whites: 0.955)
-            i = vignette(i, 0.25)
+            i = vignette(i, 0.15)
             return grain(i, 0.035)
         },
         Look(id: "moody", name: "Moody", protects: true) { image in
             var i = tone(image, r: [-0.012, 1.0, 0], g: [0, 1, 0], b: [0.016, 1.0, -0.016])
-            i = controls(i, saturation: 0.82, contrast: 1.12, brightness: -0.02)
-            i = curve(i, blacks: 0.012, low: 0.2, high: 0.79, whites: 0.97)
-            i = vignette(i, 0.6)
+            i = controls(i, saturation: 0.84, contrast: 1.08, brightness: -0.01)
+            i = curve(i, blacks: 0.015, low: 0.21, high: 0.785, whites: 0.97)
+            i = vignette(i, 0.3)
             return grain(i, 0.03)
         },
         Look(id: "clean", name: "Pulito", protects: true) { image in
             var i = controls(image, saturation: 1.04, contrast: 1.04)
             i = curve(i, blacks: 0.0, low: 0.24, high: 0.77, whites: 1.0)
-            return vignette(i, 0.12)
+            return vignette(i, 0.06)
         },
         Look(id: "noir", name: "Noir", protects: false) { image in
             var i = controls(image, saturation: 0, contrast: 1.18)
             i = curve(i, blacks: 0.02, low: 0.2, high: 0.8, whites: 0.98)
-            i = vignette(i, 0.5)
+            i = vignette(i, 0.3)
             return grain(i, 0.045)
         }
     ]

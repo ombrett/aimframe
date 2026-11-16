@@ -295,6 +295,7 @@ enum BodyFraming {
     /// Joints in Vision coordinates (0...1, y up). Returns nil when the framing is right.
     /// Instructions are for whoever holds the phone (`selfie` = the person is holding it).
     static func issue(step: CarouselStep, joints: [Joint: CGPoint], selfie: Bool) -> Instruction? {
+        guard step.usesBody else { return nil }
         guard let neck = joints[.neck] else {
             return .guide(selfie ? "Mettiti davanti alla fotocamera" : "Inquadra la persona", for: .photographer)
         }

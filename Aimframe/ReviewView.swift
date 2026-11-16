@@ -1,57 +1,45 @@
 import SwiftUI
 
-/// Shown right after a shot: the photo with the recommended look, other looks to try, and Save.
+/// Shown right after a shot: the photo with the suggested look, the other looks, Before/After and Save.
+/// Nothing is written until Save: every change stays reversible.
 struct ReviewView: View {
     @ObservedObject var cam: CameraModel
-
-    private let accent = Color(red: 1.0, green: 0.77, blue: 0.24)
-    private let panel = Color(white: 0.11)
+    @State private var showingOriginal = false
 
     var body: some View {
         ZStack {
-            Color.black.ignoresSafeArea()
-            VStack(spacing: 14) {
-                if let image = cam.reviewImage {
-                    Image(uiImage: image)
-                        .resizable()
-                        .scaledToFit()
-                        .clipShape(RoundedRectangle(cornerRadius: 8))
-                        .padding(.horizontal, 12)
-                        .padding(.top, 8)
-                }
-
-                Text(cam.recommendReason)
-                    .font(.system(size: 14, weight: .medium, design: .rounded))
-                    .foregroundColor(Color(white: 0.75))
-                    .multilineTextAlignment(.center)
-                    .padding(.horizontal, 16)
-
-                ScrollView(.horizontal, showsIndicators: false) {
-                    HStack(spacing: 10) {
-                        ForEach(Grade.looks) { look in
-                            Button {
-                                cam.selectLook(look.id)
-                            } label: {
-                                lookCell(look)
-                            }
-                        }
+            Theme.background.ignoresSafeArea()
+            VStack(spacing: 12) {
+                HStack {
+                    Button { cam.discardReview() } label: {
+                        Label("Scarta", systemImage: "trash").font(Theme.body())
                     }
-                    .padding(.horizontal, 14)
-                }
-
-                HStack(spacing: 12) {
-                    Text("Intensità")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .foregroundColor(Color(white: 0.65))
-                    Slider(value: Binding(get: { cam.intensity }, set: { cam.setIntensity($0) }), in: 0...1)
-                        .tint(accent)
-                    Text("\(Int((cam.intensity * 100).rounded()))%")
-                        .font(.system(size: 13, weight: .medium, design: .rounded))
-                        .monospacedDigit()
-                        .foregroundColor(Color(white: 0.65))
-                        .frame(width: 44, alignment: .trailing)
+                    .foregroundColor(Theme.ivoryDim)
+                    Spacer()
+                    Button { cam.resetEdits() } label: {
+                        Label("Ripristina", systemImage: "arrow.uturn.backward").font(Theme.body())
+                    }
+                    .foregroundColor(Theme.ivoryDim)
+                    .disabled(cam.selectedLook == cam.recommendedLook && cam.intensity == 1 && cam.frameStyle == 0)
                 }
                 .padding(.horizontal, 18)
+                .padding(.top, 6)
+
+                photo
+
+                VStack(spacing: 3) {
+                    Text(cam.recommendReason)
+                        .font(Theme.body(14))
+                        .foregroundColor(Theme.ivory)
+                    Text("Suggerimento automatico da luce e colori misurati, non da un'AI generativa")
+                        .font(Theme.small(11))
+                        .foregroundColor(Theme.ivoryDim)
+                }
+                .multilineTextAlignment(.center)
+                .padding(.horizontal, 18)
+
+                looks
+                intensityRow
 
                 Picker("Cornice", selection: Binding(get: { cam.frameStyle }, set: { cam.setFrameStyle($0) })) {
                     Text("Senza cornice").tag(0)
@@ -61,59 +49,102 @@ struct ReviewView: View {
                 .pickerStyle(.segmented)
                 .padding(.horizontal, 16)
 
-                HStack(spacing: 12) {
-                    Button {
-                        cam.discardReview()
-                    } label: {
-                        Text("Scarta")
-                            .font(.system(size: 16, weight: .semibold, design: .rounded))
-                            .foregroundColor(.white)
-                            .frame(maxWidth: .infinity, minHeight: 50)
-                            .background(panel)
-                            .clipShape(RoundedRectangle(cornerRadius: 14))
-                    }
-                    Button {
-                        cam.saveReview()
-                    } label: {
-                        Text(cam.savingReview ? "Salvo…" : "Salva")
-                            .font(.system(size: 16, weight: .semibold, design: .rounded))
-                            .foregroundColor(Color(red: 0.1, green: 0.08, blue: 0.01))
-                            .frame(maxWidth: .infinity, minHeight: 50)
-                            .background(accent)
-                            .clipShape(RoundedRectangle(cornerRadius: 14))
-                    }
-                    .disabled(cam.savingReview)
+                Button { cam.saveReview() } label: {
+                    Label(cam.savingReview ? "Salvo…" : "Salva in Foto", systemImage: "square.and.arrow.down")
+                        .font(Theme.title())
+                        .foregroundColor(Theme.background)
+                        .frame(maxWidth: .infinity, minHeight: 52)
+                        .background(Theme.yellow)
+                        .clipShape(RoundedRectangle(cornerRadius: 14))
                 }
+                .disabled(cam.savingReview)
                 .padding(.horizontal, 16)
-                .padding(.bottom, 12)
+                .padding(.bottom, 8)
             }
         }
         .preferredColorScheme(.dark)
     }
 
-    private func lookCell(_ look: Look) -> some View {
+    private var photo: some View {
+        ZStack(alignment: .topLeading) {
+            if let image = showingOriginal ? (cam.reviewOriginal ?? cam.reviewImage) : cam.reviewImage {
+                Image(uiImage: image)
+                    .resizable()
+                    .scaledToFit()
+                    .clipShape(RoundedRectangle(cornerRadius: 8))
+            }
+            Pill(text: showingOriginal ? "Prima" : "Dopo · tieni premuto per l'originale",
+                 color: showingOriginal ? Theme.ivory : Theme.ivoryDim,
+                 symbol: showingOriginal ? "eye" : "hand.tap")
+                .padding(8)
+        }
+        .padding(.horizontal, 12)
+        .frame(maxHeight: .infinity)
+        .contentShape(Rectangle())
+        .onLongPressGesture(minimumDuration: 0.15, maximumDistance: 40, pressing: { pressing in
+            if pressing != showingOriginal { Haptics.selection() }
+            showingOriginal = pressing
+        }, perform: {})
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(showingOriginal ? "Foto originale" : "Foto con il look \(Grade.look(cam.selectedLook).name)")
+        .accessibilityHint("Tieni premuto per confrontare con l'originale")
+    }
+
+    private var looks: some View {
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 10) {
+                ForEach(Grade.looks) { look in
+                    Button { cam.selectLook(look.id) } label: { cell(look) }
+                        .accessibilityLabel(look.name + (cam.recommendedLook == look.id ? ", consigliato" : ""))
+                        .accessibilityAddTraits(cam.selectedLook == look.id ? .isSelected : [])
+                }
+            }
+            .padding(.horizontal, 14)
+        }
+    }
+
+    private func cell(_ look: Look) -> some View {
         let selected = cam.selectedLook == look.id
         let recommended = cam.recommendedLook == look.id
-        return VStack(spacing: 5) {
+        return VStack(spacing: 4) {
             ZStack {
                 if let thumb = cam.lookThumbs[look.id] {
                     Image(uiImage: thumb).resizable().scaledToFill()
                 } else {
-                    panel
+                    Theme.panel
                 }
             }
-            .frame(width: 66, height: 88)
+            .frame(width: 62, height: 82)
             .clipShape(RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke(selected ? accent : Color.clear, lineWidth: 2.5))
-
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(selected ? Theme.yellow : Color.clear, lineWidth: 2.5))
             Text(look.name)
-                .font(.system(size: 11, weight: .medium, design: .rounded))
-                .foregroundColor(selected ? accent : Color(white: 0.75))
+                .font(Theme.small(11))
+                .foregroundColor(selected ? Theme.yellow : Theme.ivoryDim)
                 .lineLimit(1)
-            Text(recommended ? "Consigliato" : " ")
+            Label("Consigliato", systemImage: "star.fill")
+                .labelStyle(.titleAndIcon)
                 .font(.system(size: 9, weight: .bold, design: .rounded))
-                .foregroundColor(accent)
+                .foregroundColor(Theme.yellow)
+                .opacity(recommended ? 1 : 0)
         }
-        .frame(width: 84)
+        .frame(width: 80)
+    }
+
+    private var intensityRow: some View {
+        HStack(spacing: 12) {
+            Text("Originale")
+                .font(Theme.small(12))
+                .foregroundColor(Theme.ivoryDim)
+            Slider(value: Binding(get: { cam.intensity }, set: { cam.setIntensity($0) }), in: 0...1)
+                .tint(Theme.yellow)
+                .accessibilityLabel("Intensità del look")
+                .accessibilityValue("\(Int((cam.intensity * 100).rounded())) per cento")
+            Text("\(Int((cam.intensity * 100).rounded()))%")
+                .font(Theme.small(12))
+                .monospacedDigit()
+                .foregroundColor(Theme.ivoryDim)
+                .frame(width: 40, alignment: .trailing)
+        }
+        .padding(.horizontal, 18)
     }
 }

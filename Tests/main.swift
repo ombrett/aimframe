@@ -186,7 +186,10 @@ do {
     noFeet[.lAnkle] = nil; noFeet[.rAnkle] = nil
     let msg = BodyFraming.issue(step: .full, joints: noFeet, selfie: false)
     check(msg?.audience == .photographer && msg?.text.contains("piedi") == true, "framing: no feet asks the photographer", msg?.text ?? "-")
-    check(BodyFraming.issue(step: .half, joints: noFeet, selfie: false) == nil, "framing: half-length does not need feet")
+    let half: [Joint: CGPoint] = [.nose: CGPoint(x: 0.5, y: 0.86), .neck: CGPoint(x: 0.5, y: 0.78), .root: CGPoint(x: 0.5, y: 0.18)]
+    check(BodyFraming.issue(step: .half, joints: half, selfie: false) == nil, "framing: half-length does not need feet")
+    let farHalf = BodyFraming.issue(step: .half, joints: noFeet, selfie: false)
+    check(farHalf?.text == "Avvicinati alla persona", "framing: half-length too small asks to get closer", farHalf?.text ?? "-")
     var left = full
     left[.root] = CGPoint(x: 0.2, y: 0.5)
     check(BodyFraming.issue(step: .full, joints: left, selfie: true)?.text == "Spostati un po' alla tua sinistra", "framing: selfie side uses the person's own left")
@@ -270,11 +273,9 @@ do {
         sumDiff += d
     }
     let meanDiff = sumDiff / Float(original.count / 4)
-    check(maxDiff * 255 <= 12 && meanDiff * 255 <= 4, "grain: no pixel moves more than a few levels",
+    check(maxDiff * 255 <= 12 && meanDiff * 255 <= 3, "grain: no pixel moves more than a few levels",
           String(format: "max %.1f, mean %.2f levels", maxDiff * 255, meanDiff * 255))
 
-    let skinRect = CGRect(x: 100, y: 180, width: 100, height: 140)       // second skin patch
-    let skinBefore = Grade.average(small, rect: skinRect)
     for look in Grade.looks {
         let preview = Grade.render(small, look: look, intensity: 1)
         let full = Grade.render(big, look: look, intensity: 1)
@@ -284,10 +285,27 @@ do {
         check(worst < 0.04, "look \(look.id): preview matches the full-size photo", String(format: "worst block %.3f", worst))
 
         if look.protects {
-            let s = Grade.average(preview, rect: skinRect)
-            let shift = max(abs(s.r - skinBefore.r), abs(s.g - skinBefore.g), abs(s.b - skinBefore.b))
-            check(shift < 0.09, "look \(look.id): skin tone stays close", String(format: "shift %.3f", shift))
+            // All four skin patches, measured in their middle: close to the original and still skin-coloured
+            // (red above green above blue), so no purple or green casts.
+            var worstShift: CGFloat = 0
+            var hueKept = true
+            for i in 0..<4 {
+                let r = CGRect(x: CGFloat(i) * 100 + 30, y: 210, width: 40, height: 80)
+                let a = Grade.average(small, rect: r), g = Grade.average(preview, rect: r)
+                worstShift = max(worstShift, abs(g.r - a.r), abs(g.g - a.g), abs(g.b - a.b))
+                if !(g.r > g.g && g.g > g.b) { hueKept = false }
+            }
+            check(worstShift < 0.08, "look \(look.id): every skin tone stays close", String(format: "worst shift %.3f", worstShift))
+            check(hueKept, "look \(look.id): skin keeps its hue (no purple or green cast)")
         }
+        // Corners: darker is fine, black is not.
+        let corner = Grade.average(preview, rect: CGRect(x: 0, y: 470, width: 30, height: 30))
+        let cornerBefore = Grade.average(small, rect: CGRect(x: 0, y: 470, width: 30, height: 30))
+        let centre = Grade.average(preview, rect: CGRect(x: 185, y: 470, width: 30, height: 30))
+        let centreBefore = Grade.average(small, rect: CGRect(x: 185, y: 470, width: 30, height: 30))
+        let cornerRatio = (corner.r + corner.g + corner.b + 0.01) / (cornerBefore.r + cornerBefore.g + cornerBefore.b + 0.01)
+        let centreRatio = (centre.r + centre.g + centre.b + 0.01) / (centreBefore.r + centreBefore.g + centreBefore.b + 0.01)
+        check(cornerRatio > centreRatio * 0.6, "look \(look.id): vignette stays gentle", String(format: "corner %.2f vs centre %.2f", cornerRatio, centreRatio))
         let skyRect = CGRect(x: 0, y: 470, width: 400, height: 30)
         let skyTop = Grade.average(preview, rect: CGRect(x: 0, y: 340, width: 400, height: 10))
         _ = skyRect
