@@ -359,11 +359,14 @@ do {
 
     // A dark photo (the recording) is brightened and never sent to a darker look.
     let dark = small.applyingFilter("CIColorMatrix", parameters: [
-        "inputRVector": CIVector(x: 0.3, y: 0, z: 0, w: 0), "inputGVector": CIVector(x: 0, y: 0.3, z: 0, w: 0),
-        "inputBVector": CIVector(x: 0, y: 0, z: 0.3, w: 0), "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)]).cropped(to: small.extent)
+        "inputRVector": CIVector(x: 0.07, y: 0, z: 0, w: 0), "inputGVector": CIVector(x: 0, y: 0.07, z: 0, w: 0),
+        "inputBVector": CIVector(x: 0, y: 0, z: 0.07, w: 0), "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)]).cropped(to: small.extent)
     let darkBig = big.applyingFilter("CIColorMatrix", parameters: [
-        "inputRVector": CIVector(x: 0.3, y: 0, z: 0, w: 0), "inputGVector": CIVector(x: 0, y: 0.3, z: 0, w: 0),
-        "inputBVector": CIVector(x: 0, y: 0, z: 0.3, w: 0), "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)]).cropped(to: big.extent)
+        "inputRVector": CIVector(x: 0.07, y: 0, z: 0, w: 0), "inputGVector": CIVector(x: 0, y: 0.07, z: 0, w: 0),
+        "inputBVector": CIVector(x: 0, y: 0, z: 0.07, w: 0), "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)]).cropped(to: big.extent)
+    // Core Image scales in linear light: ×0.07 there is about ×0.3 on screen, like the 26% of the recording.
+    let darkMean = Grade.average(dark, rect: dark.extent)
+    check(darkMean.g < 0.3, "light fix: test photo is really dark", String(format: "mean %.2f", darkMean.g))
     let fix = Grade.measureLight(dark)
     check(fix.exposure > 0.3, "light fix: a dark photo is brightened", String(format: "+%.2f EV, shadows %.2f", fix.exposure, fix.shadows))
     let fixBig = Grade.measureLight(darkBig)
