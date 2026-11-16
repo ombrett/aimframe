@@ -53,7 +53,11 @@ final class CameraModel: NSObject, ObservableObject {
 
     @Published var authorized = true
     @Published var phase: GuidePhase = .free {
-        didSet { if oldValue != phase { phaseSince = CACurrentMediaTime() } }
+        didSet {
+            if oldValue != phase { phaseSince = CACurrentMediaTime() }
+            if phase == .free { autoShotFired = false }
+            if phase != .guiding && phase != .locked { shotScore = nil }
+        }
     }
     @Published var subjectBox: CGRect?
     @Published var target = CGPoint(x: 0.5, y: 0.5)
@@ -88,6 +92,8 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var savingReview = false
     @Published var frameStyle = 0                 // 0 none, 1 white card, 2 black card
     @Published var exposureText = ""
+    @Published var shotScore: Int?                // 0...100 while the guide is on (landscape)
+    @Published var lightNote = ""                 // shown when the app corrects the exposure
 
     let session = AVCaptureSession()
     private let speaker = Speaker()
@@ -107,6 +113,7 @@ final class CameraModel: NSObject, ObservableObject {
     private var steadySince: CFTimeInterval = 0
     private var nextAutoScan: CFTimeInterval = 0
     private var needsMove = false                 // after a shot, wait for the phone to move to a new scene
+    private var autoShotFired = false             // one automatic shot per lock, until the guide is reset
     private var overlayOpen = false
 
     // MARK: Guide state (videoQueue only; Vision coordinates, origin at the bottom left)
@@ -123,6 +130,12 @@ final class CameraModel: NSObject, ObservableObject {
     private var locked = false
     private var advice = "Inquadratura giusta. Resta fermo e scatta."
     private var exposureTick = 0
+
+    // Exposure correction (videoQueue)
+    private var lightBias: Float = 0
+    private var pendingBias: Float = 0
+    private var biasVotes = 0
+    private var lightScore: CGFloat = 1
 
     // MARK: Outfit state (videoQueue only)
 
@@ -254,8 +267,11 @@ final class CameraModel: NSObject, ObservableObject {
     private func autoPilot(turning: Double) {
         let now = CACurrentMediaTime()
         if turning > 0.12 { steadySince = now }
+        guard mode == .landscape, autoShot, reviewImage == nil, !overlayOpen else {
+            steadySince = now
+            return
+        }
         if turning > 0.6 { needsMove = false }
-        guard mode == .landscape, autoShot, reviewImage == nil, !overlayOpen else { return }
         switch phase {
         case .free:
             if needsMove {
@@ -267,8 +283,10 @@ final class CameraModel: NSObject, ObservableObject {
                 hint = "Punta il telefono sulla scena e tienilo fermo"
             }
         case .locked:
-            if now - phaseSince > 0.9 {
+            if !autoShotFired && now - phaseSince > 0.9 {
+                autoShotFired = true
                 needsMove = true
+                nextAutoScan = now + 2
                 capture()
                 scanOrClear()
             }
@@ -458,8 +476,13 @@ final class CameraModel: NSObject, ObservableObject {
         let shownBox = flip(box)
         let shownTarget = CGPoint(x: goalPoint.x, y: 1 - goalPoint.y)
         let nowLocked = locked
+        let framing = nowLocked ? 1 : max(0, 1 - far / 0.3) * (zoomDone ? 1 : 0.85)
+        let light = lightScore
         DispatchQueue.main.async {
             guard self.phase == .guiding || self.phase == .locked else { return }
+            var level: CGFloat = 1
+            if let r = self.roll { level = max(0, min(1, 1 - (CGFloat(abs(r)) - 0.026) / 0.15)) }
+            self.shotScore = Int(((0.6 * framing + 0.2 * level + 0.2 * light) * 100).rounded())
             self.subjectBox = shownBox
             self.target = shownTarget
             self.phase = nowLocked ? .locked : .guiding
@@ -498,6 +521,58 @@ final class CameraModel: NSObject, ObservableObject {
         if sky.b > sky.r * 1.15 { return "Soggetto isolato, cielo pulito sopra: scatta" }
         if colour < 0.12 { return "Pochi colori: contano forme e contrasto. Scatta" }
         return "Soggetto isolato dallo sfondo: resta fermo e scatta"
+    }
+
+    /// Reads the brightness of the frame and, when it is clearly too bright or too dark,
+    /// shifts the camera's exposure so beginners don't get burnt skies or murky rooms.
+    private func measureLight(_ pixelBuffer: CVPixelBuffer) {
+        guard CVPixelBufferGetPlaneCount(pixelBuffer) > 0 else { return }
+        CVPixelBufferLockBaseAddress(pixelBuffer, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(pixelBuffer, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddressOfPlane(pixelBuffer, 0) else { return }
+        let w = CVPixelBufferGetWidthOfPlane(pixelBuffer, 0), h = CVPixelBufferGetHeightOfPlane(pixelBuffer, 0)
+        let rowBytes = CVPixelBufferGetBytesPerRowOfPlane(pixelBuffer, 0)
+        let luma = base.assumingMemoryBound(to: UInt8.self)
+        var sum = 0, count = 0, bright = 0, dark = 0
+        var y = 0
+        while y < h {
+            var x = 0
+            while x < w {
+                let v = Int(luma[y * rowBytes + x])
+                sum += v
+                count += 1
+                if v >= 250 { bright += 1 } else if v <= 10 { dark += 1 }
+                x += 12
+            }
+            y += 12
+        }
+        guard count > 0 else { return }
+        let mean = CGFloat(sum) / CGFloat(count) / 255
+        let hi = CGFloat(bright) / CGFloat(count), lo = CGFloat(dark) / CGFloat(count)
+        lightScore = max(0, min(1, 1 - hi * 4 - lo * 2 - max(0, 0.22 - mean) * 3 - max(0, mean - 0.78) * 3))
+
+        // What the exposure should be, with some stickiness so it does not flip back and forth.
+        var want: Float = lightBias
+        if lightBias < 0 {
+            if hi < 0.005 && mean < 0.3 { want = 0 }
+        } else if lightBias > 0 {
+            if hi > 0.04 || mean > 0.5 { want = 0 }
+        } else if hi > 0.10 {
+            want = -0.7
+        } else if mean < 0.2 && hi < 0.02 {
+            want = 0.7
+        }
+        if want == pendingBias { biasVotes += 1 } else { pendingBias = want; biasVotes = 1 }
+        guard biasVotes >= 4, want != lightBias else { return }
+        lightBias = want
+        let note = want < 0 ? "Troppa luce: abbasso l'esposizione" : (want > 0 ? "Scena scura: alzo l'esposizione" : "")
+        sessionQueue.async {
+            guard let device = self.device, (try? device.lockForConfiguration()) != nil else { return }
+            let bias = max(device.minExposureTargetBias, min(device.maxExposureTargetBias, want))
+            device.setExposureTargetBias(bias, completionHandler: nil)
+            device.unlockForConfiguration()
+        }
+        DispatchQueue.main.async { self.lightNote = note }
     }
 
     /// Shutter speed and ISO the camera is using right now.
@@ -919,6 +994,7 @@ extension CameraModel: AVCaptureVideoDataOutputSampleBufferDelegate {
         guard !paused, let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         exposureTick += 1
         if exposureTick % 10 == 0 { publishExposure() }
+        if exposureTick % 8 == 0 { measureLight(pixelBuffer) }
         if vMode == .outfit {
             frameCount += 1
             if frameCount % 2 == 0 { runPose(pixelBuffer) }

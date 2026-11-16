@@ -206,7 +206,7 @@ enum Grade {
         var out = placed.composited(over: card)
 
         let text = CIFilter.textImageGenerator()
-        text.text = "Shot on iPhone  ·  Aimframe"
+        text.text = "Aimframe"
         text.fontName = "HelveticaNeue-Medium"
         text.fontSize = Float(side * 0.017)
         text.scaleFactor = 1

@@ -183,12 +183,43 @@ struct ContentView: View {
                     .padding(.top, 10)
                 }
                 Spacer()
+                if !cam.lightNote.isEmpty && cam.toast == nil {
+                    Text(cam.lightNote)
+                        .font(.system(size: 12, weight: .semibold, design: .rounded))
+                        .foregroundColor(aimColor)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 4)
+                        .background(Color.black.opacity(0.5))
+                        .clipShape(Capsule())
+                        .padding(.bottom, 4)
+                }
                 if !cam.exposureText.isEmpty && cam.toast == nil {
                     Text(cam.exposureText)
                         .font(.system(size: 11, weight: .medium, design: .rounded))
                         .monospacedDigit()
                         .foregroundColor(Color.white.opacity(0.75))
                         .padding(.bottom, 8)
+                }
+            }
+            if cam.mode == .landscape, let score = cam.shotScore {
+                VStack {
+                    HStack {
+                        Spacer()
+                        VStack(spacing: 0) {
+                            Text("\(score)")
+                                .font(.system(size: 22, weight: .bold, design: .rounded))
+                                .monospacedDigit()
+                            Text("voto")
+                                .font(.system(size: 10, weight: .semibold, design: .rounded))
+                        }
+                        .foregroundColor(score >= 80 ? lockColor : (score >= 50 ? aimColor : Color(white: 0.75)))
+                        .frame(width: 54, height: 54)
+                        .background(Color.black.opacity(0.55))
+                        .clipShape(Circle())
+                        .padding(10)
+                        .accessibilityLabel("Voto dell'inquadratura \(score) su 100")
+                    }
+                    Spacer()
                 }
             }
             if cam.flash {
