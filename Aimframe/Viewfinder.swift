@@ -83,7 +83,7 @@ struct CompositionBadge: View {
 
     var body: some View {
         VStack(alignment: .trailing, spacing: 3) {
-            Text("Composizione \(result.word.lowercased())")
+            Text("Inquadratura \(result.word)")
                 .font(Theme.small(11))
                 .foregroundColor(result.value >= 80 ? Theme.green : (result.value >= 60 ? Theme.yellow : Theme.ivory))
             HStack(spacing: 6) {
@@ -102,7 +102,7 @@ struct CompositionBadge: View {
         .background(Color.black.opacity(0.55))
         .clipShape(RoundedRectangle(cornerRadius: 9))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Composizione \(result.word): " + result.criteria.map { "\($0.name) \($0.ok ? "ok" : "da sistemare")" }.joined(separator: ", "))
+        .accessibilityLabel("Inquadratura \(result.word): " + result.criteria.map { "\($0.name) \($0.ok ? "ok" : "da sistemare")" }.joined(separator: ", "))
     }
 }
 

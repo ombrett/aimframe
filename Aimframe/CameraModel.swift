@@ -85,6 +85,7 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var lightNote = ""
     @Published var exposureText = ""
     @Published var systemNote = ""               // camera interrupted, phone hot
+    @Published var lightLevel: LightLevel = .good
     @Published var photosDenied = false
 
     // Outfit
@@ -204,6 +205,7 @@ final class CameraModel: NSObject, ObservableObject {
 
     // Exposure
     private var exposure = ExposureDecider()
+    private var vLight: LightLevel = .good
     private var tick = 0
 
     // Outfit / carousel body
@@ -222,6 +224,7 @@ final class CameraModel: NSObject, ObservableObject {
     // Review (gradeQueue)
     private var reviewData: Data?
     private var reviewBase: CIImage?
+    private var reviewLight = LightFix()
     private var renderToken = 0
 
     // MARK: Init
@@ -471,11 +474,11 @@ final class CameraModel: NSObject, ObservableObject {
             } else if phase == .lost && now - phaseSince > 2 {
                 clearGuide()
             }
-            let fire = auto.update(now: now, ready: phase == .locked, steady: still, enabled: true)
+            let fire = auto.update(now: now, ready: phase == .locked && lightLevel != .veryLow, steady: still, enabled: true)
             autoProgress = auto.progress
             if fire { capture(automatic: true) }
         case .carousel:
-            let fire = auto.update(now: now, ready: carouselReady && carouselStep.usesBody, steady: still, enabled: true)
+            let fire = auto.update(now: now, ready: carouselReady && carouselStep.usesBody && lightLevel != .veryLow, steady: still, enabled: true)
             autoProgress = auto.progress
             if fire { capture(automatic: true) }
         case .outfit:
@@ -707,7 +710,9 @@ final class CameraModel: NSObject, ObservableObject {
         }
 
         let next: Instruction
-        if locked {
+        if locked, let warn = LightCheck.advice(vLight) {
+            next = .warning(warn)
+        } else if locked {
             next = .good(advice.isEmpty ? "Inquadratura giusta: resta fermo" : advice)
         } else if let text = Aim.instruction(dx: dx, dy: dy, axis: &aimAxis) {
             next = .guide(text, for: .photographer)
@@ -728,7 +733,7 @@ final class CameraModel: NSObject, ObservableObject {
             self.subjectBox = shownBox
             self.target = shownTarget
             self.phase = nowLocked ? .locked : .guiding
-            self.composition = Composition.evaluate(roll: self.roll, box: shownBox, distance: far)
+            self.composition = Composition.evaluate(roll: self.roll, box: shownBox, distance: far, light: self.lightLevel)
             if nowLocked && !wasLocked { Haptics.success() }
             self.show(next, urgent: nowLocked != wasLocked)
         }
@@ -824,7 +829,12 @@ final class CameraModel: NSObject, ObservableObject {
         guard seconds > 0, seconds.isFinite else { return }
         let shutter = seconds >= 1 ? String(format: "%.1fs", seconds) : "1/\(Int((1 / seconds).rounded()))"
         let text = "\(shutter)  ISO \(Int(cam.iso.rounded()))"
-        DispatchQueue.main.async { if self.exposureText != text { self.exposureText = text } }
+        vLight = LightCheck.level(iso: Double(cam.iso), seconds: seconds, previous: vLight)
+        let level = vLight
+        DispatchQueue.main.async {
+            if self.exposureText != text { self.exposureText = text }
+            if self.lightLevel != level { self.lightLevel = level }
+        }
     }
 
     // MARK: Modes
@@ -940,7 +950,8 @@ final class CameraModel: NSObject, ObservableObject {
 
         if vMode == .carousel {
             let issue = BodyFraming.issue(step: vStep, joints: joints, selfie: vFront)
-            let next = issue ?? .good(vAutoShot ? "Pronto: tieni fermo, scatto da solo" : "Pronto: scatta")
+            let next = issue ?? (LightCheck.advice(vLight).map { Instruction.warning($0) }
+                ?? .good(vAutoShot ? "Pronto: tieni fermo, scatto da solo" : "Pronto: scatta"))
             publishBody(body: joints, ghost: [:], matched: false, count: nil, next: next, carouselReady: issue == nil)
             return
         }
@@ -954,7 +965,7 @@ final class CameraModel: NSObject, ObservableObject {
         }
 
         let facing = joints[.nose] != nil
-        var next = Instruction.good("Inquadratura ok: scatta quando vuoi")
+        var next = LightCheck.advice(vLight).map { Instruction.warning($0) } ?? Instruction.good("Inquadratura ok: scatta quando vuoi")
         var matched = false
         var ghostJoints: [Joint: CGPoint] = [:]
         let fullRef = (refPose?.angles.count ?? 0) >= 6
@@ -1200,7 +1211,8 @@ final class CameraModel: NSObject, ObservableObject {
                 return
             }
             let base = Grade.scaled(full, maxSide: 900)
-            let image = Grade.uiImage(Grade.framed(Grade.render(base, look: Grade.look(look), intensity: CGFloat(intensity)), style: frame))
+            let fix = Grade.measureLight(full)
+            let image = Grade.uiImage(Grade.framed(Grade.render(base, look: Grade.look(look), intensity: CGFloat(intensity), light: fix), style: frame))
             DispatchQueue.main.async { completion(image) }
         }
     }
@@ -1243,13 +1255,15 @@ final class CameraModel: NSObject, ObservableObject {
         let base = Grade.scaled(full, maxSide: 1400)
         let small = Grade.scaled(full, maxSide: 220)
         let pick = Grade.recommend(small)
+        let fix = Grade.measureLight(full)
         var thumbs: [String: UIImage] = [:]
         for look in Grade.looks {
-            if let t = Grade.uiImage(Grade.render(small, look: look, intensity: 1)) { thumbs[look.id] = t }
+            if let t = Grade.uiImage(Grade.render(small, look: look, intensity: 1, light: fix)) { thumbs[look.id] = t }
         }
         reviewData = data
         reviewBase = base
-        guard let preview = Grade.uiImage(Grade.render(base, look: Grade.look(pick.id), intensity: 1)),
+        reviewLight = fix
+        guard let preview = Grade.uiImage(Grade.render(base, look: Grade.look(pick.id), intensity: 1, light: fix)),
               let original = Grade.uiImage(base) else {
             reviewData = nil
             reviewBase = nil
@@ -1305,7 +1319,7 @@ final class CameraModel: NSObject, ObservableObject {
         let style = frameStyle
         gradeQueue.async {
             guard token == self.renderToken, let base = self.reviewBase,
-                  let image = Grade.uiImage(Grade.framed(Grade.render(base, look: Grade.look(id), intensity: amount), style: style)) else { return }
+                  let image = Grade.uiImage(Grade.framed(Grade.render(base, look: Grade.look(id), intensity: amount, light: self.reviewLight), style: style)) else { return }
             DispatchQueue.main.async {
                 if token == self.renderToken && self.reviewImage != nil { self.reviewImage = image }
             }

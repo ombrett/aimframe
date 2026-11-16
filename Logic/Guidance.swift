@@ -208,6 +208,43 @@ struct ExposureDecider {
     }
 }
 
+// MARK: - Light
+
+/// How much light the camera has, from the shutter time and ISO it chose. With little light the
+/// photo comes out dark and noisy whatever the framing, so the app says so instead of "ready".
+enum LightLevel: Equatable {
+    case good, low, veryLow
+}
+
+enum LightCheck {
+    /// `previous` adds hysteresis so the warning does not flicker at the threshold.
+    static func level(iso: Double, seconds: Double, previous: LightLevel) -> LightLevel {
+        let veryLowIn = iso >= 4000 || seconds >= 1.0 / 8
+        let veryLowOut = iso < 3200 && seconds < 1.0 / 10
+        let lowIn = iso >= 1600 || seconds >= 1.0 / 25
+        let lowOut = iso < 1250 && seconds < 1.0 / 30
+        switch previous {
+        case .veryLow:
+            if !veryLowOut { return .veryLow }
+            return lowOut ? .good : .low
+        case .low:
+            if veryLowIn { return .veryLow }
+            return lowOut ? .good : .low
+        case .good:
+            if veryLowIn { return .veryLow }
+            return lowIn ? .low : .good
+        }
+    }
+
+    static func advice(_ level: LightLevel) -> String? {
+        switch level {
+        case .good: return nil
+        case .low: return "Poca luce: avvicinati a una finestra o accendi una luce"
+        case .veryLow: return "Troppo buio: la foto verrà scura e mossa. Cerca più luce"
+        }
+    }
+}
+
 // MARK: - Composition indicator
 
 struct Criterion: Equatable {
@@ -226,9 +263,13 @@ enum Composition {
     /// - roll: tilt of the phone in radians (nil when it is pointing steeply up or down)
     /// - box: the subject, 0...1 coordinates (nil when there is none)
     /// - distance: how far the subject is from its target point, 0...1 (nil when unknown)
-    static func evaluate(roll: Double?, box: CGRect?, distance: CGFloat?) -> CompositionResult? {
+    static func evaluate(roll: Double?, box: CGRect?, distance: CGFloat?, light: LightLevel? = nil) -> CompositionResult? {
         var parts: [(weight: Double, score: Double)] = []
         var criteria: [Criterion] = []
+        if let l = light {
+            parts.append((0.25, l == .good ? 1 : (l == .low ? 0.5 : 0.1)))
+            criteria.append(Criterion(name: "Luce", ok: l == .good))
+        }
         if let d = distance {
             let s = max(0, 1 - Double(d) / 0.3)
             parts.append((0.5, s))
@@ -250,7 +291,8 @@ enum Composition {
         let total = parts.reduce(0) { $0 + $1.weight }
         let raw = parts.reduce(0) { $0 + $1.weight * $1.score } / total
         let value = Int((raw * 10).rounded()) * 10
-        let word = value >= 80 ? "Ottima" : (value >= 60 ? "Buona" : "Da migliorare")
+        // It measures framing and light, not whether the scene is beautiful: the words say only that.
+        let word = value >= 80 ? "ok" : (value >= 60 ? "quasi" : "da sistemare")
         return CompositionResult(value: value, word: word, criteria: criteria)
     }
 }

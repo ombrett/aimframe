@@ -12,6 +12,15 @@ struct Look: Identifiable {
     let apply: (CIImage) -> CIImage
 }
 
+/// A light correction measured on a small copy of the photo and applied the same way to the preview
+/// and the full-size export, so both match. Zero means "leave it as it is".
+struct LightFix: Equatable {
+    var exposure: Double = 0      // stops of brightening (0...1.3)
+    var shadows: Double = 0       // shadow lift (0...0.7)
+
+    var isZero: Bool { exposure < 0.01 && shadows < 0.01 }
+}
+
 /// Why a look was suggested: measured values, and the rule that used them. No generative analysis.
 struct LookAdvice {
     let id: String
@@ -168,6 +177,60 @@ enum Grade {
         return mix.outputImage?.cropped(to: original.extent) ?? graded
     }
 
+    // MARK: Light fix
+
+    /// Measures brightness on a fixed 96-pixel copy (so preview and export measure the same thing).
+    static func measureLight(_ image: CIImage) -> LightFix {
+        let small = scaled(image, maxSide: 96)
+        let e = small.extent.integral
+        let w = Int(e.width), h = Int(e.height)
+        guard w > 0, h > 0 else { return LightFix() }
+        var px = [Float](repeating: 0, count: w * h * 4)
+        let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        context.render(small, toBitmap: &px, rowBytes: w * 16, bounds: e, format: .RGBAf, colorSpace: space)
+        var lumas: [Float] = []
+        lumas.reserveCapacity(w * h)
+        for i in stride(from: 0, to: px.count, by: 4) {
+            lumas.append(0.2126 * px[i] + 0.7152 * px[i + 1] + 0.0722 * px[i + 2])
+        }
+        lumas.sort()
+        let median = Double(lumas[lumas.count / 2])
+        let bright = Double(lumas[min(lumas.count - 1, lumas.count * 97 / 100)])
+        var fix = LightFix()
+        // Brighten towards a mid-tone median, but never so much that the bright parts burn.
+        if median < 0.36 {
+            let wanted = log2(0.42 / max(median, 0.04))
+            let room = log2(0.97 / max(bright, 0.05))
+            fix.exposure = max(0, min(1.3, min(wanted, max(room, 0) + 0.25)))
+        }
+        if median < 0.45 {
+            fix.shadows = max(0, min(0.7, (0.45 - median) * 2.2))
+        }
+        return fix
+    }
+
+    static func applyLight(_ image: CIImage, _ fix: LightFix) -> CIImage {
+        guard !fix.isZero else { return image }
+        var out = image
+        if fix.exposure > 0.01 {
+            let ev = CIFilter.exposureAdjust()
+            ev.inputImage = out
+            ev.ev = Float(fix.exposure)
+            out = ev.outputImage ?? out
+            // Roll the brightest tones off gently instead of clipping them.
+            out = curve(out, blacks: 0, low: 0.25, high: 0.74, whites: 0.97)
+        }
+        if fix.shadows > 0.01 {
+            let hs = CIFilter.highlightShadowAdjust()
+            hs.inputImage = out
+            hs.shadowAmount = Float(fix.shadows)
+            hs.highlightAmount = 1
+            hs.radius = Float(max(image.extent.width, image.extent.height) / 200)
+            out = hs.outputImage ?? out
+        }
+        return out.cropped(to: image.extent)
+    }
+
     // MARK: The looks
 
     static let looks: [Look] = [
@@ -216,11 +279,12 @@ enum Grade {
         looks.first(where: { $0.id == id }) ?? looks[0]
     }
 
-    /// The photo with a look applied at 0...1 strength. 0 gives back the original unchanged.
-    static func render(_ base: CIImage, look: Look, intensity: CGFloat) -> CIImage {
+    /// The photo with the light fix and a look applied at 0...1 strength. 0 gives back the original unchanged.
+    static func render(_ base: CIImage, look: Look, intensity: CGFloat, light: LightFix = LightFix()) -> CIImage {
         if intensity <= 0.001 { return base }
-        var graded = look.apply(base).cropped(to: base.extent)
-        if look.protects { graded = protect(graded, original: base) }
+        let lit = applyLight(base, light)
+        var graded = look.apply(lit).cropped(to: base.extent)
+        if look.protects { graded = protect(graded, original: lit) }
         if intensity >= 0.999 { return graded }
         let mix = CIFilter.dissolveTransition()
         mix.inputImage = base
@@ -263,8 +327,9 @@ enum Grade {
         func advice(_ id: String, _ text: String) -> LookAdvice {
             LookAdvice(id: id, reason: text, brightness: light, warmth: warmth, colourfulness: Double(colour))
         }
-        if light < 0.28 {
-            return advice("moody", "Foto scura (luminosità media \(pct)%): Moody tiene il contrasto senza schiarire")
+        if light < 0.3 {
+            // A dark photo needs light, not a darker look: it is brightened first, then kept clean.
+            return advice("clean", "Foto scura (luminosità media \(pct)%): l'ho schiarita e uso Pulito, che non la scurisce")
         }
         if warmth > 1.25 {
             return advice("golden", "Luce calda (rosso/blu \(String(format: "%.1f", warmth))): Golden Hour la asseconda")
@@ -326,7 +391,8 @@ enum Grade {
     /// With no look and no frame the original file is returned untouched.
     static func export(_ data: Data, look id: String, intensity: Double, frame: Int) -> Data {
         guard intensity >= 0.01 || frame != 0, let full = CIImage(data: data, options: [.applyOrientationProperty: true]) else { return data }
-        var graded = framed(render(full, look: look(id), intensity: CGFloat(intensity)), style: frame)
+        let fix = measureLight(full)
+        var graded = framed(render(full, look: look(id), intensity: CGFloat(intensity), light: fix), style: frame)
         var props = full.properties
         props[kCGImagePropertyOrientation as String] = 1
         if var tiff = props[kCGImagePropertyTIFFDictionary as String] as? [String: Any] {

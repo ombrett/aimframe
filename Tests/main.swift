@@ -148,11 +148,24 @@ do {
     let edge = Composition.evaluate(roll: 0, box: CGRect(x: 0.0, y: 0.4, width: 0.2, height: 0.2), distance: 0.0)
     check(edge?.criteria.first(where: { $0.name == "Bordi" })?.ok == false, "score: subject touching the edge is flagged")
     let good = Composition.evaluate(roll: 0.01, box: CGRect(x: 0.3, y: 0.3, width: 0.3, height: 0.3), distance: 0.02)
-    check(good?.value == 100 && good?.word == "Ottima", "score: lined up and level", "\(good?.value ?? -1)")
+    check(good?.value == 100 && good?.word == "ok", "score: lined up and level", "\(good?.value ?? -1)")
+    let dim = Composition.evaluate(roll: 0.01, box: CGRect(x: 0.3, y: 0.3, width: 0.3, height: 0.3), distance: 0.02, light: .low)
+    check(dim?.criteria.first(where: { $0.name == "Luce" })?.ok == false && (dim?.value ?? 100) < 100, "score: little light is flagged and lowers it", "\(dim?.value ?? -1)")
     let tilted = Composition.evaluate(roll: 0.2, box: CGRect(x: 0.3, y: 0.3, width: 0.3, height: 0.3), distance: 0.02)
     check((tilted?.value ?? 100) < (good?.value ?? 0), "score: tilt lowers it", "\(tilted?.value ?? -1)")
     check((tilted?.value ?? 1) % 10 == 0, "score: shown in steps of 10")
     check(Composition.evaluate(roll: nil, box: nil, distance: nil) == nil, "score: nothing measured, nothing shown")
+}
+
+// MARK: Light
+
+do {
+    // The recording: 1/17 s at ISO 2351 → little light.
+    check(LightCheck.level(iso: 2351, seconds: 1.0 / 17, previous: .good) == .low, "light: 1/17 s ISO 2351 is low light")
+    check(LightCheck.level(iso: 100, seconds: 1.0 / 500, previous: .good) == .good, "light: daylight is fine")
+    check(LightCheck.level(iso: 5000, seconds: 1.0 / 4, previous: .good) == .veryLow, "light: very dark")
+    check(LightCheck.level(iso: 1400, seconds: 1.0 / 60, previous: .low) == .low, "light: no flicker just under the threshold")
+    check(LightCheck.level(iso: 800, seconds: 1.0 / 60, previous: .low) == .good, "light: clears with clearly more light")
 }
 
 // MARK: Pose wording
@@ -343,6 +356,30 @@ do {
         check(topBand.b > topBand.r, "frame \(style): photo is upright (sky at the top)")
         savePNG(Grade.scaled(framed, maxSide: 600), "frame-\(style).png")
     }
+
+    // A dark photo (the recording) is brightened and never sent to a darker look.
+    let dark = small.applyingFilter("CIColorMatrix", parameters: [
+        "inputRVector": CIVector(x: 0.3, y: 0, z: 0, w: 0), "inputGVector": CIVector(x: 0, y: 0.3, z: 0, w: 0),
+        "inputBVector": CIVector(x: 0, y: 0, z: 0.3, w: 0), "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)]).cropped(to: small.extent)
+    let darkBig = big.applyingFilter("CIColorMatrix", parameters: [
+        "inputRVector": CIVector(x: 0.3, y: 0, z: 0, w: 0), "inputGVector": CIVector(x: 0, y: 0.3, z: 0, w: 0),
+        "inputBVector": CIVector(x: 0, y: 0, z: 0.3, w: 0), "inputAVector": CIVector(x: 0, y: 0, z: 0, w: 1)]).cropped(to: big.extent)
+    let fix = Grade.measureLight(dark)
+    check(fix.exposure > 0.3, "light fix: a dark photo is brightened", String(format: "+%.2f EV, shadows %.2f", fix.exposure, fix.shadows))
+    let fixBig = Grade.measureLight(darkBig)
+    check(abs(fixBig.exposure - fix.exposure) < 0.1 && abs(fixBig.shadows - fix.shadows) < 0.1, "light fix: same correction on preview and full size",
+          String(format: "%.2f vs %.2f EV", fix.exposure, fixBig.exposure))
+    let brighter = Grade.average(Grade.render(dark, look: Grade.look("clean"), intensity: 1, light: fix), rect: dark.extent)
+    let before = Grade.average(dark, rect: dark.extent)
+    check(brighter.g > before.g + 0.08, "light fix: the result is visibly brighter", String(format: "%.2f → %.2f", before.g, brighter.g))
+    let brightFix = Grade.measureLight(small)
+    check(brightFix.exposure < 0.05, "light fix: a well-lit photo is left alone", String(format: "+%.2f EV", brightFix.exposure))
+    let darkAdvice = Grade.recommend(Grade.scaled(dark, maxSide: 220))
+    check(darkAdvice.id != "moody" && darkAdvice.id != "noir", "advice: a dark photo is not given a darker look", darkAdvice.reason)
+    savePNG(dark, "dark-original.png")
+    savePNG(Grade.render(dark, look: Grade.look(darkAdvice.id), intensity: 1, light: fix), "dark-fixed.png")
+    check(Grade.render(dark, look: Grade.look("clean"), intensity: 0, light: fix) == dark || pixels(Grade.render(dark, look: Grade.look("clean"), intensity: 0, light: fix)) == pixels(dark),
+          "light fix: the slider at 0 is still the untouched original")
 
     let advice = Grade.recommend(Grade.scaled(small, maxSide: 220))
     check(!advice.reason.isEmpty && Grade.looks.contains(where: { $0.id == advice.id }), "advice: names a real look with a measured reason", advice.reason)
