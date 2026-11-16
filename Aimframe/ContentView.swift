@@ -271,8 +271,19 @@ struct ContentView: View {
         }
 
         if cam.mode == .outfit {
-            // The pose to copy, drawn on the person's own body
-            if !cam.ghost.isEmpty {
+            let showShape = cam.selectedPoseID == "import" && cam.silhouette != nil
+            // The inspiration's figure, fixed in the frame: step inside it
+            if showShape, let shape = cam.silhouette {
+                Image(uiImage: shape)
+                    .resizable()
+                    .scaledToFit()
+                    .scaleEffect(x: cam.silhouetteMirrored ? -1 : 1, y: 1)
+                    .frame(width: w, height: h)
+                    .opacity(cam.poseMatched ? 0.5 : 0.9)
+                    .allowsHitTesting(false)
+            }
+            // Otherwise the pose to copy, drawn on the person's own body
+            if !showShape && !cam.ghost.isEmpty {
                 skeleton(cam.ghost, in: size)
                     .stroke((cam.poseMatched ? lockColor : aimColor).opacity(0.85),
                             style: StrokeStyle(lineWidth: 6, lineCap: .round, lineJoin: .round))

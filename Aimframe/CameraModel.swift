@@ -1,6 +1,7 @@
 import AVFoundation
 import Combine
 import CoreImage
+import CoreImage.CIFilterBuiltins
 import CoreMotion
 import ImageIO
 import Photos
@@ -79,6 +80,8 @@ final class CameraModel: NSObject, ObservableObject {
     @Published var countdown: Int?
     @Published var selectedPoseID = "free"
     @Published var importedPose: RefPose?
+    @Published var silhouette: UIImage?           // the person cut out of the inspiration photo
+    @Published var silhouetteMirrored = false
     @Published var voiceOn = true
     @Published var autoShot = true
 
@@ -221,10 +224,16 @@ final class CameraModel: NSObject, ObservableObject {
             ultra = true
         }
         let front = position == .front
-        videoQueue.async { self.vFront = front }
+        videoQueue.async {
+            self.vFront = front
+            self.lightBias = 0
+            self.pendingBias = 0
+            self.biasVotes = 0
+        }
         DispatchQueue.main.async {
             self.hasUltraWide = ultra
             self.isFront = front
+            self.lightNote = ""
         }
         applyZoom(display: 1, ramp: false)
     }
@@ -745,6 +754,7 @@ final class CameraModel: NSObject, ObservableObject {
 
     private func publishPose(body: [Joint: CGPoint], ghost: [Joint: CGPoint], matched: Bool, count: Int?, hint: String, speak: Bool) {
         let front = vFront
+        let flipShape = front != useMirror
         func shown(_ joints: [Joint: CGPoint]) -> [Joint: CGPoint] {
             var out: [Joint: CGPoint] = [:]
             for (j, p) in joints { out[j] = CGPoint(x: front ? 1 - p.x : p.x, y: 1 - p.y) }
@@ -755,6 +765,7 @@ final class CameraModel: NSObject, ObservableObject {
             guard self.mode == .outfit else { return }
             self.body = shownBody
             self.ghost = shownGhost
+            self.silhouetteMirrored = flipShape
             self.poseMatched = matched
             self.countdown = count
             self.hint = hint
@@ -797,7 +808,10 @@ final class CameraModel: NSObject, ObservableObject {
                 return
             }
             let request = VNDetectHumanBodyPoseRequest()
-            try? VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:]).perform([request])
+            let segmentation = VNGeneratePersonSegmentationRequest()
+            segmentation.qualityLevel = .accurate
+            segmentation.outputPixelFormat = kCVPixelFormatType_OneComponent8
+            try? VNImageRequestHandler(cgImage: cgImage, orientation: .up, options: [:]).perform([request, segmentation])
             var joints: [Joint: CGPoint] = [:]
             if let observation = request.results?.first { joints = Self.joints(from: observation) }
             let angles = PoseMath.angles(joints, aspect: size.width / size.height)
@@ -806,13 +820,49 @@ final class CameraModel: NSObject, ObservableObject {
                 return
             }
             let pose = RefPose(id: "import", name: "Ispirazione", angles: angles)
+            let shape = segmentation.results?.first.flatMap { Self.silhouetteImage(mask: $0.pixelBuffer, size: size) }
             DispatchQueue.main.async {
+                self.silhouette = shape
                 self.importedPose = pose
                 self.selectPose(pose)
                 self.showToast("Posa copiata dalla foto")
                 completion?(true)
             }
         }
+    }
+
+    /// A see-through white figure with a yellow outline, the same size as the inspiration photo.
+    private static func silhouetteImage(mask buffer: CVPixelBuffer, size: CGSize) -> UIImage? {
+        let raw = CIImage(cvPixelBuffer: buffer)
+        guard raw.extent.width > 0, raw.extent.height > 0 else { return nil }
+        let rect = CGRect(origin: .zero, size: size)
+        let mask = raw.transformed(by: CGAffineTransform(scaleX: size.width / raw.extent.width,
+                                                         y: size.height / raw.extent.height)).cropped(to: rect)
+        let soft = CIFilter.colorMatrix()                   // the inside of the figure, at 40%
+        soft.inputImage = mask
+        soft.rVector = CIVector(x: 0.4, y: 0, z: 0, w: 0)
+        soft.gVector = CIVector(x: 0, y: 0.4, z: 0, w: 0)
+        soft.bVector = CIVector(x: 0, y: 0, z: 0.4, w: 0)
+        soft.aVector = CIVector(x: 0, y: 0, z: 0, w: 1)
+        let edge = CIFilter.morphologyGradient()            // the outline
+        edge.inputImage = mask
+        edge.radius = Float(max(2, size.width / 220))
+        guard let fillMask = soft.outputImage, let edgeMask = edge.outputImage?.cropped(to: rect) else { return nil }
+
+        let clear = CIImage(color: CIColor(red: 0, green: 0, blue: 0, alpha: 0)).cropped(to: rect)
+        let white = CIImage(color: CIColor(red: 1, green: 1, blue: 1)).cropped(to: rect)
+        let yellow = CIImage(color: CIColor(red: 1, green: 0.77, blue: 0.24)).cropped(to: rect)
+        let fill = CIFilter.blendWithMask()
+        fill.inputImage = white
+        fill.backgroundImage = clear
+        fill.maskImage = fillMask
+        guard let inside = fill.outputImage else { return nil }
+        let outline = CIFilter.blendWithMask()
+        outline.inputImage = yellow
+        outline.backgroundImage = inside
+        outline.maskImage = edgeMask
+        guard let figure = outline.outputImage?.cropped(to: rect) else { return nil }
+        return Grade.uiImage(figure)
     }
 
     /// Uses a picture the user copied in another app (Pinterest, Safari, Instagram).
