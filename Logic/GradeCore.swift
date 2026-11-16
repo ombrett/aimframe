@@ -152,10 +152,13 @@ enum Grade {
 
     /// Mixes part of the original back where there is skin or near-white light.
     static func protect(_ graded: CIImage, original: CIImage) -> CIImage {
-        let cube = CIFilter.colorCube()
+        // The cube is defined on ordinary (gamma-encoded) sRGB values, so it must be applied in sRGB,
+        // not in Core Image's linear working space where dark skin looks far more saturated.
+        let cube = CIFilter.colorCubeWithColorSpace()
         cube.inputImage = original
         cube.cubeDimension = 32
         cube.cubeData = protectCube
+        cube.colorSpace = CGColorSpace(name: CGColorSpace.sRGB)
         guard let mask = cube.outputImage else { return graded }
         let mix = CIFilter.blendWithMask()
         mix.inputImage = original
